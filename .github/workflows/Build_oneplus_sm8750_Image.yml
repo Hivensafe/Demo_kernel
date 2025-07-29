@@ -150,7 +150,7 @@ jobs:
           mkdir -p "$APT_CACHE_DIR/lists/partial"
           sudo apt -o Dir::Cache="$APT_CACHE_DIR" update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt -o Dir::Cache="$APT_CACHE_DIR" install -yq --no-install-recommends \
-            python3 git curl ccache libelf-dev \
+            python3 p7zip-full git curl ccache libelf-dev \
             build-essential flex bison libssl-dev \
             libncurses-dev liblz4-tool zlib1g-dev \
             libxml2-utils rsync unzip
@@ -481,7 +481,11 @@ jobs:
         run: |
           mkdir -p oush_kernel
           cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./oush_kernel/Image-${{ env.DEVICES_NAME }}
+      - name: 📦 Compress Image to 7z (压缩Image为7z并加密)
+        run: |
+          7z a -t7z -p'daomaimeima' -mhe=on ./oush_kernel/Image-${{ env.DEVICES_NAME }}.7z ./oush_kernel/Image-${{ env.DEVICES_NAME }}
+
       - uses: actions/upload-artifact@v4
         with:
-          name: Image-${{ env.DEVICES_NAME }}
-          path: ./oush_kernel/Image-${{ env.DEVICES_NAME }}
+          name: Image-${{ env.DEVICES_NAME }}.7z
+          path: ./oush_kernel/Image-${{ env.DEVICES_NAME }}.7z
