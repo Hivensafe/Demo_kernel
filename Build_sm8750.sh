@@ -26,7 +26,7 @@ info "3.一加 13T"
 info "4.一加 Pad 2 Pro"
 info "5.一加 Ace5 至尊版"
 info "6.真我 GT 7 Pro"
-info "7.真我 GT 7 Pro 竞速版"
+info "7.真我 GT 7 Pro 竞速"
 
 read -p "输入选择 [1-4]: " device_choice
 
