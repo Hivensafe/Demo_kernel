@@ -82,12 +82,12 @@ jobs:
               echo "DEVICE_MOD=13" >> $GITHUB_ENV
               ;;
             oneplus_13t)
-              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_13t_v" >> $GITHUB_ENV
+              echo "REPO_MANIFEST=oneplus_13t" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_13t" >> $GITHUB_ENV
               echo "DEVICE_MOD=13t" >> $GITHUB_ENV
               ;;
             oneplus_pad_2_pro)
-              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_pad_2_pro_v" >> $GITHUB_ENV
+              echo "REPO_MANIFEST=oneplus_pad_2_pro" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_pad_2_pro" >> $GITHUB_ENV
               echo "DEVICE_MOD=Pad2Pro" >> $GITHUB_ENV
               ;;  
@@ -97,17 +97,17 @@ jobs:
               echo "DEVICE_MOD=Pad2ProN" >> $GITHUB_ENV
               ;;
             oneplus_ace5_ultra)
-              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_ultra_v" >> $GITHUB_ENV
+              echo "REPO_MANIFEST=oneplus_ace5_ultra" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_ace5_ultra" >> $GITHUB_ENV
               echo "DEVICE_MOD=Ace5Ultra" >> $GITHUB_ENV
               ;;
             realme_GT7pro)
-              echo "REPO_MANIFEST=JiuGeFaCai_realme_GT7pro_v" >> $GITHUB_ENV
+              echo "REPO_MANIFEST=realme_GT7pro" >> $GITHUB_ENV
               echo "DEVICES_NAME=realme_GT7pro" >> $GITHUB_ENV
               echo "DEVICE_MOD=GT7pro" >> $GITHUB_ENV
               ;;
             realme_GT7pro_Speed)
-              echo "REPO_MANIFEST=JiuGeFaCai_realme_GT7pro_Speed_v" >> $GITHUB_ENV
+              echo "REPO_MANIFEST=realme_GT7pro_Speed" >> $GITHUB_ENV
               echo "DEVICES_NAME=realme_GT7pro_Speed" >> $GITHUB_ENV
               echo "DEVICE_MOD=GT7proSpeed" >> $GITHUB_ENV
               ;;
