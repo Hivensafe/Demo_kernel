@@ -74,18 +74,42 @@ jobs:
             oneplus_ace5_pro)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_pro_v" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_ace5_pro" >> $GITHUB_ENV
+              echo "DEVICE_MOD=Ace5Pro" >> $GITHUB_ENV
               ;;
             oneplus_13)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_13_v" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_13" >> $GITHUB_ENV
+              echo "DEVICE_MOD=13" >> $GITHUB_ENV
               ;;
+            oneplus_13t)
+              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_13t_v" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_13t" >> $GITHUB_ENV
+              echo "DEVICE_MOD=13t" >> $GITHUB_ENV
+              ;;
+            oneplus_pad_2_pro)
+              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_pad_2_pro_v" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_pad_2_pro" >> $GITHUB_ENV
+              echo "DEVICE_MOD=Pad2Pro" >> $GITHUB_ENV
+              ;;  
             oneplus_pad_2_pro_New)
               echo "REPO_MANIFEST=oneplus_13t" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_pad_2_pro_New" >> $GITHUB_ENV
+              echo "DEVICE_MOD=Pad2ProN" >> $GITHUB_ENV
               ;;
-            *)
-              echo "REPO_MANIFEST=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
-              echo "DEVICES_NAME=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
+            oneplus_ace5_ultra)
+              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_ultra_v" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_ace5_ultra" >> $GITHUB_ENV
+              echo "DEVICE_MOD=Ace5Ultra" >> $GITHUB_ENV
+              ;;
+            realme_GT7pro)
+              echo "REPO_MANIFEST=JiuGeFaCai_realme_GT7pro_v" >> $GITHUB_ENV
+              echo "DEVICES_NAME=realme_GT7pro" >> $GITHUB_ENV
+              echo "DEVICE_MOD=GT7pro" >> $GITHUB_ENV
+              ;;
+            realme_GT7pro_Speed)
+              echo "REPO_MANIFEST=JiuGeFaCai_realme_GT7pro_Speed_v" >> $GITHUB_ENV
+              echo "DEVICES_NAME=realme_GT7pro_Speed" >> $GITHUB_ENV
+              echo "DEVICE_MOD=GT7proSpeed" >> $GITHUB_ENV
               ;;
           esac
 
@@ -480,12 +504,12 @@ jobs:
       - name: 📤 Upload Image (上传构建后的Image)
         run: |
           mkdir -p oush_kernel
-          cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./oush_kernel/Image-${{ env.DEVICES_NAME }}
+          cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./oush_kernel/Image-${{ env.DEVICE_MOD }}
       - name: 📦 Compress Image to 7z (压缩Image为7z并加密)
         run: |
-          7z a -t7z -p'daomaimeima' -mhe=on ./oush_kernel/Image-${{ env.DEVICES_NAME }}.7z ./oush_kernel/Image-${{ env.DEVICES_NAME }}
+          7z a -t7z -p'daomaimeima' -mhe=on ./oush_kernel/Image-${{ env.DEVICE_MOD }}.7z ./oush_kernel/Image-${{ env.DEVICE_MOD }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Image-${{ env.DEVICES_NAME }}.7z
-          path: ./oush_kernel/Image-${{ env.DEVICES_NAME }}.7z
+          name: Image-${{ env.DEVICE_MOD }}.7z
+          path: ./oush_kernel/Image-${{ env.DEVICE_MOD }}.7z
