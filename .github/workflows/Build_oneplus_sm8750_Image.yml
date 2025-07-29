@@ -479,15 +479,9 @@ jobs:
           
       - name: 📤 Upload Image (上传构建后的Image)
         run: |
-          cd kernel_workspace/kernel_platform/common
-          cp ./out/arch/arm64/boot/Image ./out/arch/arm64/boot/Image-${DEVICES_NAME}
-          if [ -f kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image-${DEVICES_NAME} ]; then
-            echo "IMAGE_PATH=kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image-${DEVICES_NAME}" >> $GITHUB_ENV
-          else
-            echo "IMAGE_PATH=kernel_workspace/kernel_platform/common/out/arch/arm64/boot/*" >> $GITHUB_ENV
-            echo "::warning ::未找到Image-${DEVICES_NAME}，将上传boot目录下所有文件"
-          fi
+          mkdir -p oush_kernel
+          cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./oush_kernel/Image-${{ env.DEVICES_NAME }}
       - uses: actions/upload-artifact@v4
         with:
           name: Image-${{ env.DEVICES_NAME }}
-          path: kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image-${{ env.DEVICES_NAME }}
+          path: ./oush_kernel/Image-${{ env.DEVICES_NAME }}
