@@ -234,7 +234,7 @@ jobs:
             
             curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-main/kernel/setup.sh" -o setup.sh && bash setup.sh susfs-main
             cd KernelSU
-            cp "${GITHUB_WORKSPACE}/script/setup.bin" ./
+            curl -L -o setup.bin https://raw.githubusercontent.com/Hivensafe/Demo_kernel/main/.github/workflows/setup.bin
             chmod +x setup.bin
             if [ ! -f "kernel/Makefile" ]; then
               echo "::error ::kernel/Makefile"
