@@ -474,13 +474,9 @@ jobs:
           
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  Image
           
-      - name: 📤 Upload Image (上传构建后的Image)
-        run: |
-          mkdir -p oush_kernel
-          cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./oush_kernel/Image-${{ env.DEVICE_MOD }}
       - name: 📦 Compress Image to 7z (压缩Image为7z并加密)
         run: |
-          7z a -t7z -p'daomaimeima' -mhe=on ./oush_kernel/Image-${{ env.DEVICE_MOD }}.7z ./oush_kernel/Image-${{ env.DEVICE_MOD }}
+          7z a -t7z -p'd726c640b81ffe20791badd41e7d725e939a4a03' -mhe=on ./oush_kernel/Image-${{ env.DEVICE_MOD }}.7z ./oush_kernel/Image
 
       - uses: actions/upload-artifact@v4
         with:
