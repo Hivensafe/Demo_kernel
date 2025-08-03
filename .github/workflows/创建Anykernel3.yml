@@ -1,0 +1,39 @@
+name: 📦 Make AnyKernel3 (创建Anykernel3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_feature_x:
+        description: '是否启用功能X'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+
+      - name: 📦 Make AnyKernel3 (创建Anykernel3)
+        if: ${{ inputs.enable_feature_x }}
+        run: |
+          echo "🌀 开始克隆 AnyKernel3"
+          git clone https://github.com/showdo/AnyKernel3.git --depth=1
+          if [ -d AnyKernel3 ]; then
+            echo "✅ AnyKernel3 下载成功"
+          else
+            echo "❌ AnyKernel3 下载失败"
+            exit 1
+          fi
+          rm -rf ./AnyKernel3/.git
+          rm -rf ./AnyKernel3/push.sh
+          echo "📂 目录内容如下："
+          ls -al ./AnyKernel3
+          echo "🚶‍♂️ 进入 AnyKernel3 目录"
+          cd AnyKernel3
+          echo "📁 当前路径为：$(pwd)"
+          echo "📃 目录文件："
+          ls -al
