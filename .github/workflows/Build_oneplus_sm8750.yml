@@ -263,20 +263,15 @@ jobs:
            # Apply patches
            cd ./common
            if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ]; then
-              # 定义初始要删除的文件列表
                 files=(
                     "lib/lz4/lz4_compress.c"
                     "lib/lz4/lz4_decompress.c"
                     "lib/lz4/lz4defs.h"
                     "lib/lz4/lz4hc_compress.c"
                 )
-                # 执行删除操作
                 for file in "${files[@]}"; do
                     if [ -e "$file" ]; then
                         rm "$file"
-                        echo "$file 已删除"
-                    else
-                        echo "$file 不存在"
                     fi
                 done
 
