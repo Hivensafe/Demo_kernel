@@ -275,26 +275,7 @@ jobs:
                     fi
                 done
 
-
-              cp -r ${GITHUB_WORKSPACE}/zram/lz4/* ./lib/lz4/
-              cp -r ${GITHUB_WORKSPACE}/zram/include/linux/* ./include/linux/
-              cp ${GITHUB_WORKSPACE}/zram/6.6/lz4_1.10.0.patch ./
-
-              patch -p1 -F 3 --fuzz=5 < lz4_1.10.0.patch || true
-
-              # 检查文件是否存在
-              if [ -f "fs/f2fs/Makefile" ]; then
-                  # 检查是否包含指定行
-                  if ! grep -qF "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" "fs/f2fs/Makefile"; then
-                      echo "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" >> "fs/f2fs/Makefile"
-                      echo "已添加: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
-                  else
-                      echo "文件已经包含: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
-                  fi
-              else
-                  echo "文件不存在: fs/f2fs/Makefile"
-              fi
-            fi
+              
           
            if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ]; then
             sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
