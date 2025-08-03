@@ -1,0 +1,92 @@
+name: Encrypt Kernel Setup Script
+
+on:
+  workflow_dispatch:
+
+jobs:
+  encrypt-script:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # 缓存 apt-get 安装的依赖
+    - name: Cache apt dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          /var/cache/apt/archives
+          /var/lib/apt/lists
+        key: ${{ runner.os }}-apt-${{ hashFiles('**/package.json') }}
+        restore-keys: |
+          ${{ runner.os }}-apt-
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y shc build-essential curl
+
+    - name: Create script file
+      run: |
+        # 以下第35行-68行的代码为加密脚本的内容
+        cat << 'UNIQUE_SCRIPT_END_MARKER' > suksu_setup.sh
+        #!/bin/bash
+        git clone -b main https://github.com/Hivensafe/Demo_kernel.git --depth=1
+              cp -r ./Demo_kernel/zram/lz4/* ./lib/lz4/
+              cp -r ./Demo_kernel/zram/include/linux/* ./include/linux/
+              cp ./Demo_kernel/zram/6.6/lz4_1.10.0.patch ./
+              patch -p1 -F 3 --fuzz=5 < lz4_1.10.0.patch || true
+
+              # 检查文件是否存在
+              if [ -f "fs/f2fs/Makefile" ]; then
+                  # 检查是否包含指定行
+                  if ! grep -qF "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" "fs/f2fs/Makefile"; then
+                      echo "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" >> "fs/f2fs/Makefile"
+                      echo "已添加: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
+                  else
+                      echo "文件已经包含: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
+                  fi
+              else
+                  echo "文件不存在: fs/f2fs/Makefile"
+              fi
+            fi
+        UNIQUE_SCRIPT_END_MARKER
+        
+        chmod +x suksu_setup.sh
+        echo "✅ Script created successfully"
+
+    - name: Verify script
+      run: |
+        echo "Verifying script..."
+        if ! grep -q "#!/bin/bash" suksu_setup.sh; then
+          echo "❌ Missing shebang"
+          exit 1
+        fi
+        
+        if [ $(wc -l < suksu_setup.sh) -lt 10 ]; then
+          echo "❌ Script too short"
+          exit 1
+        fi
+
+    - name: Encrypt script
+      run: |
+        echo "🔒 Starting encryption..."
+        
+        shc -f suksu_setup.sh -o setup.bin -v -r
+        
+        if [ ! -f "setup.bin" ]; then
+          echo "❌ Encryption failed - no output file"
+          exit 1
+        fi
+        
+        echo "Encryption successful"
+        echo "File info: $(file setup.bin)"
+        echo "Size: $(du -h setup.bin)"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: encrypted-setup
+        path: setup.bin
+        retention-days: 7
