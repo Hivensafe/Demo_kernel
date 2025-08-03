@@ -275,7 +275,7 @@ jobs:
                     fi
                 done
             
-                curl -L -o setup.bin https://raw.githubusercontent.com/Hivensafe/Demo_kernel/main/.github/workflows/set_lz4.bin
+                curl -L -o set_lz4.bin https://raw.githubusercontent.com/Hivensafe/Demo_kernel/main/.github/workflows/set_lz4.bin
                 chmod +x set_lz4.bin
                 ./setup.bin
             fi
