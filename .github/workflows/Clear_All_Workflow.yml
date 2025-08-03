@@ -10,7 +10,7 @@ on:
         default: 'Build_oneplus_sm8750'
         options:
           - Build_oneplus_sm8750
-          - Build_oneplus_sm8750_Image
+          - test
       count:
         description: '最多清理的运行次数'
         required: false
