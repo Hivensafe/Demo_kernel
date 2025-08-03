@@ -234,6 +234,8 @@ jobs:
             
             curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-main/kernel/setup.sh" -o setup.sh && bash setup.sh susfs-main
             cd KernelSU
+            KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10700)
+            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             curl -L -o setup.bin https://raw.githubusercontent.com/Hivensafe/Demo_kernel/main/.github/workflows/setup.bin
             chmod +x setup.bin
             if [ ! -f "kernel/Makefile" ]; then
@@ -486,5 +488,5 @@ jobs:
       - name: 📤 Upload AnyKernel3 (上传 Anykernel3)
         uses: actions/upload-artifact@v4
         with:
-         name: AK3_KPM_${{ env.KSUVER }}_${{ env.DEVICES_NAME }}_SuKiSU
+         name: AK3_${{ env.KSUVER }}_${{ env.DEVICES_NAME }}_SuKiSU
          path: ./AnyKernel3/*
