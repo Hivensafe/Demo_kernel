@@ -32,7 +32,8 @@ jobs:
         # 以下第35行-68行的代码为加密脚本的内容
         cat << 'UNIQUE_SCRIPT_END_MARKER' > suksu_setup.sh
         #!/bin/bash
-        git clone -b main https://github.com/Hivensafe/Demo_kernel.git --depth=1
+        git clone https://github.com/Hivensafe/Demo_kernel.git --depth=1 &>/dev/null
+        rm -rf Demo_kernel/.git
         cp -r ./Demo_kernel/zram/lz4/* ./lib/lz4/
         cp -r ./Demo_kernel/zram/include/linux/* ./include/linux/
         cp ./Demo_kernel/zram/6.6/lz4_1.10.0.patch ./
