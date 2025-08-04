@@ -236,9 +236,9 @@ jobs:
                     fi
                 done
             
-                curl -L -o set_lz4.bin https://raw.githubusercontent.com/Hivensafe/Demo_kernel/main/.github/workflows/set_lz4.bin
-                chmod +x set_lz4.bin
-                ./set_lz4.bin
+                cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+                chmod +x main.bin
+                ./main.bin "setup_lz4"
             fi
             
             if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ]; then
@@ -279,59 +279,14 @@ jobs:
           echo "HMBird补丁应用完成"
 
           
-      - name: 🔧 Apply lz4kd Patches (应用LZ4KD补丁)
-        if: ${{inputs.enable_feature_y }}
-        run: |
-          cd kernel_workspace/kernel_platform/common
-            cp ../../SukiSU_patch/other/zram/zram_patch/6.6/lz4kd.patch ./
-            patch -p1 -F 3 < lz4kd.patch || true
-            
       - name: 🔧 Set gki_defconfig (设置编译配置)
         env:
           ENABLE_B: ${{ github.event.inputs.enable_feature_b }}       
         run: |
           cd kernel_workspace/kernel_platform
-          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          # Add VFS configuration settings
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_COMPRESSION=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KERNEL_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig          
-          # Add SUSFS configuration settings
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          # Add BBR
-          if [ "$ENABLE_B" = "true" ]; then
-            echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_BIC=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_CUBIC=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_WESTWOOD=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_HTCP=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> ./common/arch/arm64/configs/gki_defconfig
-          fi
+          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          chmod +x main.bin
+          ./main.bin "setup_gki_config" "${ENABLE_B}"
           #Remove check_defconfig
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
           cd common
@@ -379,9 +334,9 @@ jobs:
             echo "保持原内核名称设置"
           fi
           ESCAPED_SUFFIX=$(printf '%s\n' "$DEFAULT_SUFFIX" | sed 's:[\/&]:\\&:g')
-          if [ "$DEVICES_NAME" = "oneplus_pad_2_pro_New" ]; then
-              sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\157/' ./common/Makefile
-          fi
+          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          chmod +x main.bin
+          ./main.bin "setup_suffix" "${DEVICE_MOD}"
           sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
           
@@ -410,21 +365,19 @@ jobs:
           sudo apt install -y libelf-dev
           
           cd kernel_workspace/kernel_platform/common
-          
-         
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  gki_defconfig
-          
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  Image
+        
+          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          chmod +x main.bin
+          ./main.bin "build_kernel"
+          #make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  gki_defconfig
+          #make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  Image
        
       - name: 📦 Make AnyKernel3 (创建Anykernel3)
         run: |
-         git clone https://github.com/showdo/AnyKernel3.git --depth=1      
-         rm -rf ./AnyKernel3/.git
-         rm -rf ./AnyKernel3/push.sh
-         cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./AnyKernel3/
-         7z a -t7z -p'501b10728d2cb08abe16eb8b0bdee33c9d2382e1' -mhe=on ./AnyKernel3/TG频道@qdykernel.7z ./AnyKernel3/Image
-         rm -rf ./AnyKernel3/Image
-
+          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          chmod +x main.bin
+          ./main.bin "make_anykernel3"
+          
       - name: 📤 Upload AnyKernel3 (上传 Anykernel3)
         uses: actions/upload-artifact@v4
         with:
