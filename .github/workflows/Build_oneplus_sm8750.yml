@@ -32,13 +32,7 @@ on:
         description: "⏰ 自定义构建时间(示例:Tue Dec 17 23:36:49 UTC 2024) - 仅在取消勾选'保持原设置'时有效"
         required: false
         default: ''
-        
-      enable_feature_y:
-        description: "启用lz4kd"
-        required: false
-        default: false
-        type: boolean
-        
+
       enable_feature_z:
         description: "添加风驰驱动"
         required: false
@@ -197,7 +191,7 @@ jobs:
             cd KernelSU
             KSU_VERSION=$(expr $(git rev-list --count main 2>/dev/null || echo 13000) + 10700)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            curl -L -o setup.bin https://raw.githubusercontent.com/Hivensafe/Demo_kernel/main/.github/workflows/setup.bin
+             cp "${GITHUB_WORKSPACE}/.github/workflows/setup.bin" ./
             chmod +x setup.bin
             if [ ! -f "kernel/Makefile" ]; then
               echo "::error ::kernel/Makefile"
