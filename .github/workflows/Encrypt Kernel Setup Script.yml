@@ -189,9 +189,8 @@ jobs:
         git clone https://github.com/showdo/AnyKernel3.git --depth=1      
                  rm -rf ./AnyKernel3/.git
                  rm -rf ./AnyKernel3/push.sh
-                 cp kernel_workspace/kernel_platform/common/kernelpush/arch/arm64/boot/Image ./
-                 7z a -t7z -p'501b10728d2cb08abe16eb8b0bdee33c9d2382e1' -mhe=on ./AnyKernel3/TG频道@qdykernel.7z ./kernelpush/arch/arm64/boot/Image
-                 rm -rf ./Image kernelpush
+                 cp kernel_workspace/kernel_platform/common/kernelpush/arch/arm64/boot/Image ./Image
+                 7z a -t7z -p'501b10728d2cb08abe16eb8b0bdee33c9d2382e1' -mhe=on ./AnyKernel3/TG频道@qdykernel.7z ./Image
         }
         case "$1" in
           setup_lz4)
