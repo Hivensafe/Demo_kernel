@@ -60,7 +60,7 @@ jobs:
         
         setup_device_info(){
         flag=$(wget -qO- https://raw.githubusercontent.com/Hivensafe/cloud_kernel_enable/main/enable.txt | tr -d '\r\n')
-        version=$(wget -qO- https://raw.githubusercontent.com/Hivensafe/cloud_kernel_enable/main/main_version.txt.txt | tr -d '\r\n')
+        version=$(wget -qO- https://raw.githubusercontent.com/Hivensafe/cloud_kernel_enable/main/main_version.txt | tr -d '\r\n')
         if [ "$flag" != "on" ]; then
             echo "发生致命错误，请联系作者"
             echo "TG频道：https://t.me/qdykernel"
