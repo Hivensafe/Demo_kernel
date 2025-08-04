@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       REPO_MANIFEST:
-        description: "请选择要编译的机型："
+        description: "📝请选择要编译的机型："
         required: true
         type: choice
         options:
@@ -18,7 +18,7 @@ on:
         default: 'oneplus_ace5_pro'
 
       keep_original_settings:
-        description: "保持原内核名称及构建时间(不懂的保持默认即可)"
+        description: "✅保持原内核名称及构建时间(不懂的保持默认即可)"
         required: false
         default: true
         type: boolean
