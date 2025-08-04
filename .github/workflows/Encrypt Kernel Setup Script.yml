@@ -60,7 +60,15 @@ jobs:
         
         setup_device_info(){
         flag=$(wget -qO- https://raw.githubusercontent.com/Hivensafe/cloud_kernel_enable/main/enable.txt | tr -d '\r\n')
+        version=$(wget -qO- https://raw.githubusercontent.com/Hivensafe/cloud_kernel_enable/main/main_version.txt.txt | tr -d '\r\n')
         if [ "$flag" != "on" ]; then
+            echo "发生致命错误，请联系作者"
+            echo "TG频道：https://t.me/qdykernel"
+            exit 1
+        fi
+         if [ "$version" != "10001" ]; then
+            echo "该分支已过期，请同步上游更新"
+            echo "TG频道：https://t.me/qdykernel"
             exit 1
         fi
         
