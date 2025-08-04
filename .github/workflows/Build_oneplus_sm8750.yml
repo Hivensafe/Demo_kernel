@@ -70,6 +70,9 @@ jobs:
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
         id: set_manifest
         run: |
+          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          chmod +x main.bin
+          ./main.bin "setup_device_info" "${{ github.event.inputs.REPO_MANIFEST }}"
           case "${{ github.event.inputs.REPO_MANIFEST }}" in
             oneplus_ace5_pro)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_pro_v" >> $GITHUB_ENV
