@@ -67,6 +67,7 @@ jobs:
           cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
           chmod +x main.bin
           ./main.bin "setup_device_info" "${{ github.event.inputs.REPO_MANIFEST }}"
+          rm -rf ./main.bin
           
       - name: ⚙️ Set KERNEL_TIME (设置构建时间)
         id: set_kernel_time
@@ -233,6 +234,7 @@ jobs:
                 cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
                 chmod +x main.bin
                 ./main.bin "setup_lz4"
+                rm -rf ./main.bin
             fi
             
             if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ]; then
@@ -281,6 +283,7 @@ jobs:
           cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
           chmod +x main.bin
           ./main.bin "setup_gki_config" "${ENABLE_B}"
+          rm -rf ./main.bin
           #Remove check_defconfig
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
           cd common
@@ -331,6 +334,7 @@ jobs:
           cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
           chmod +x main.bin
           ./main.bin "setup_suffix" "${DEVICE_MOD}"
+          rm -rf ./main.bin
           sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
           
@@ -345,9 +349,7 @@ jobs:
 
       - name: 🔨 Build Kernel (构建内核)
         run: |
-          export PATH="/usr/lib/ccache:$PATH"
-          export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86/clang-r510928/bin:$PATH"
-          
+          export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86/clang-r510928/bin:$PATH"          
           export CCACHE_COMPILERCHECK="%compiler% -dumpmachine; %compiler% -dumpversion"
           export CCACHE_NOHASHDIR="true"
           export CCACHE_HARDLINK="true"
@@ -363,6 +365,7 @@ jobs:
           cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
           chmod +x main.bin
           ./main.bin "build_kernel"
+          rm -rf ./main.bin
           #make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  gki_defconfig
           #make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  Image
        
@@ -371,6 +374,7 @@ jobs:
           cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
           chmod +x main.bin
           ./main.bin "make_anykernel3"
+          rm -rf ./main.bin
           
       - name: 📤 Upload AnyKernel3 (上传 Anykernel3)
         uses: actions/upload-artifact@v4
