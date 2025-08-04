@@ -167,14 +167,22 @@ jobs:
         }
         
         build_kernel(){
-        make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=kernelpush KCFLAGS+=-O2  gki_defconfig > /dev/null 2>&1
+        export CC="ccache clang"
+        export LLVM=1
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc
+        export PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole
+        export LD=ld.lld
+        export HOSTLD=ld.lld
+        export O=kernelpush
+        export KCFLAGS="-O2"
+        make gki_defconfig > /dev/null 2>&1
         echo "正在编译中...."
         echo "编译输出已静默..."
         echo "只要本步骤没有意外退出就是在编译中"
         echo "请耐心等待...."
-        
-        make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=kernelpush KCFLAGS+=-O2  Image > /dev/null 2>&1
-        
+        make Image > /dev/null 2>&1
         }
         
         make_anykernel3(){
