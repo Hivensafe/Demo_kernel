@@ -149,7 +149,7 @@ jobs:
         }
         
         setup_suffix(){
-        if [ "$DEVICES_NAME" = "oneplus_pad_2_pro_New" ]; then
+        if [ "$1" = "oneplus_pad_2_pro_New" ]; then
                       sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\157/' ./common/Makefile
                   fi
         }
@@ -178,7 +178,7 @@ jobs:
             setup_gki_config "$2"
             ;;
           setup_suffix)
-            setup_suffix
+            setup_suffix "$2"
             ;;
           build_kernel)
             build_kernel
