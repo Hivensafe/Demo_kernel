@@ -166,31 +166,13 @@ jobs:
                   fi
         }
         
-        build_kernel(){
-        export CC="ccache clang"
-        export LLVM=1
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc
-        export PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole
-        export LD=ld.lld
-        export HOSTLD=ld.lld
-        export O=kernelpush
-        export KCFLAGS="-O2"
-        make gki_defconfig > /dev/null 2>&1
-        echo "正在编译中...."
-        echo "编译输出已静默..."
-        echo "只要本步骤没有意外退出就是在编译中"
-        echo "请耐心等待...."
-        make Image > /dev/null 2>&1
-        }
-        
         make_anykernel3(){
         git clone https://github.com/showdo/AnyKernel3.git --depth=1      
                  rm -rf ./AnyKernel3/.git
                  rm -rf ./AnyKernel3/push.sh
-                 cp $GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common/kernelpush/arch/arm64/boot/Image ./Image
-                 7z a -t7z -p'501b10728d2cb08abe16eb8b0bdee33c9d2382e1' -mhe=on ./AnyKernel3/TG频道@qdykernel.7z ./Image
+                 cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./AnyKernel3/
+                 7z a -t7z -p'501b10728d2cb08abe16eb8b0bdee33c9d2382e1' -mhe=on ./AnyKernel3/TG频道@qdykernel.7z ./AnyKernel3/Image
+                 rm -rf ./AnyKernel3/Image
         }
         case "$1" in
           setup_lz4)
@@ -204,9 +186,6 @@ jobs:
             ;;
           setup_suffix)
             setup_suffix "$2"
-            ;;
-          build_kernel)
-            build_kernel
             ;;
           make_anykernel3)
             make_anykernel3
