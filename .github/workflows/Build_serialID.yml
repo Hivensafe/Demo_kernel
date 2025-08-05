@@ -183,77 +183,63 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for delayed serialID check (3min, reboot on fail)
+      - name: Patch main.c for serialID check after boot (kthread, 3min delay, panic on fail)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SERIALID="0x488a3e45"  # 改成你要的目标 serialID
+          EXPECTED_SERIALID="0x598e3b45"  # 改成你的目标 serialID
           cp init/main.c init/main.c.bak
       
-          # 插入所需 include
-          sed -i '/#include <linux\/slab.h>/a #include <linux/workqueue.h>\n#include <linux/fs.h>\n#include <linux/reboot.h>' init/main.c
-      
-          # 插入 delayed_work 校验逻辑
           awk -v serial="$EXPECTED_SERIALID" '
-          BEGIN { inserted=0 }
-          /^#include <linux\/reboot.h>/ && !inserted {
+          /#include <linux\/slab.h>/ {
               print;
+              print "#include <linux/kthread.h>";
+              print "#include <linux/delay.h>";
               print "#define EXPECTED_SERIALID \"" serial "\"";
               print "";
-              print "static void serialid_check_worker(struct work_struct *work);";
-              print "static DECLARE_DELAYED_WORK(serialid_work, serialid_check_worker);";
-              print "";
-              print "static void serialid_check_worker(struct work_struct *work)";
-              print "{";
+              print "static int serialid_checker_thread(void *data) {";
+              print "    msleep(3 * 60 * 1000);  // 延迟3分钟";
               print "    struct file *f;";
               print "    char buf[64] = {0};";
               print "    ssize_t ret;";
               print "    f = filp_open(\"/proc/oplusVersion/serialID\", O_RDONLY, 0);";
-              print "    if (IS_ERR(f)) {";
-              print "        pr_info(\"serialID: failed to open\\n\");";
-              print "        kernel_restart(NULL);";
-              print "        return;";
-              print "    }";
-              print "    loff_t pos = 0;";
-              print "    ret = kernel_read(f, buf, sizeof(buf)-1, &pos);";
-              print "    if (ret <= 0) {";
-              print "        pr_info(\"serialID: failed to read\\n\");";
+              print "    if (!IS_ERR(f)) {";
+              print "        loff_t pos = 0;";
+              print "        ret = kernel_read(f, buf, sizeof(buf)-1, &pos);";
               print "        filp_close(f, NULL);";
-              print "        kernel_restart(NULL);";
-              print "        return;";
-              print "    }";
-              print "    filp_close(f, NULL);";
-              print "    int len = strlen(buf);";
-              print "    if (len && buf[len-1] == '\''\\n'\'') buf[len-1] = 0, len--;";
-              print "    pr_info(\"serialID debug: [%s] expect [%s]\\n\", buf, EXPECTED_SERIALID);";
-              print "    if (strcmp(buf, EXPECTED_SERIALID) != 0) {";
-              print "        pr_emerg(\"serialID mismatch! Rebooting...\\n\");";
-              print "        kernel_restart(NULL);";
+              print "        if (ret > 0) {";
+              print "            int len = strlen(buf);";
+              print "            if (len && buf[len-1] == '\\n') buf[len-1] = 0, len--;";
+              print "            pr_emerg(\"serialID debug: [%s], expect [%s]\\n\", buf, EXPECTED_SERIALID);";
+              print "            if (strcmp(buf, EXPECTED_SERIALID) != 0) {";
+              print "                pr_emerg(\"serialID mismatch, panic!\\n\");";
+              print "                panic(\"Device serialID check failed! Refuse to boot.\\n\");";
+              print "            }";
+              print "        } else {";
+              print "            pr_emerg(\"serialID: failed to read\\n\");";
+              print "            panic(\"serialID: failed to read\\n\");";
+              print "        }";
               print "    } else {";
-              print "        pr_info(\"serialID check after delay success: [%s]\\n\", buf);";
+              print "        pr_emerg(\"serialID: failed to open\\n\");";
+              print "        panic(\"serialID: failed to open\\n\");";
               print "    }";
+              print "    return 0;";
               print "}";
-              inserted=1;
+              print "";
+              print "static int __init start_serialid_check(void) {";
+              print "    kthread_run(serialid_checker_thread, NULL, \"serialid_checker\");";
+              print "    return 0;";
+              print "}";
+              print "late_initcall(start_serialid_check);";
               next
           }
           { print }
-          ' init/main.c > init/main.c.new && mv init/main.c.new init/main.c
+          ' init/main.c.bak > init/main.c
       
-          # 在 kernel_init 末尾插入 schedule_delayed_work（3分钟后执行）
-          sed -i '/print_unknown_bootoptions();/a \ \ \ \ schedule_delayed_work(&serialid_work, 180 * HZ);' init/main.c
-      
-          # 输出 patch 片段
+          # 输出 patch 关键区方便日志审查
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
-          awk '/serialid_check_worker/,/pr_info/ {print NR, $0}' init/main.c | head -n 60
+          awk '/serialid_checker_thread/,/late_initcall/ {print NR, $0}' init/main.c | head -n 60
           echo -e "\n========================================================"
-
-
-
-
-
-
-
-
-
+      
 
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
