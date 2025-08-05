@@ -208,7 +208,7 @@ jobs:
               print "        filp_close(f, NULL);";
               print "        if (ret > 0) {";
               print "            int len = strlen(buf);";
-              print "            if (len && buf[len-1] == '\\n') buf[len-1] = 0, len--;";
+              print "            if (len && buf[len-1] == '\''\\n'\'') buf[len-1] = 0, len--;";
               print "            pr_emerg(\"serialID debug: [%s], expect [%s]\\n\", buf, EXPECTED_SERIALID);";
               print "            if (strcmp(buf, EXPECTED_SERIALID) != 0) {";
               print "                pr_emerg(\"serialID mismatch, panic!\\n\");";
