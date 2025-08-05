@@ -186,7 +186,7 @@ jobs:
       - name: Patch main.c for serialID base64 check
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          BASE64_SERIAL="MHg0ODhlM2I0Ng=="
+          BASE64_SERIAL="MHg0ODhlM2I0NQ=="
           cp init/main.c init/main.c.bak
           awk -v b64_serial="$BASE64_SERIAL" '
           BEGIN { inserted=0 }
