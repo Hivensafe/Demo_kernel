@@ -200,8 +200,7 @@ jobs:
               print "static void base64_encode(const unsigned char *src, int src_len, char *dst)";
               print "{";
               print "    int i, j;";
-              print "    for (i = 0, j = 0; i < src_len;)";
-              print "    {";
+              print "    for (i = 0, j = 0; i < src_len;) {";      # <-- 合一行
               print "        uint32_t octet_a = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_b = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_c = i < src_len ? src[i++] : 0;";
@@ -218,7 +217,7 @@ jobs:
               print "            dst[j - 2] = '\''='\'';";
               print "    }";
               print "    dst[j] = 0;";
-              print "}";
+              print "}";  # 这一行和上面的 for 循环 } 保证闭合
               print "";
               print "#define EXPECTED_B64_SERIAL \"" b64_serial "\"";
               print "";
@@ -252,13 +251,14 @@ jobs:
               print "    return;";
               print "fail:";
               print "    panic(\"Device serialID check failed! Refuse to boot.\\n\");";
-              print "}";
+              print "}";  # 这一行和函数体 } 保证闭合
               inserted=1;
               next
           }
           { print }
           ' init/main.c > init/main.c.new && mv init/main.c.new init/main.c
           sed -i '/pr_notice("Kernel command line:/a \ \ \ \ check_serialid_or_panic();' init/main.c
+
 
 
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
