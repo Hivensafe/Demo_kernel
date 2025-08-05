@@ -183,62 +183,53 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID direct check (plain compare, log only)
+      - name: Patch main.c for delayed serialID check (kernel层5分钟后校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SERIALID="0x488e3b45"  # 填你的真实 serialID
+          EXPECTED_SERIALID="0x488e3b45"  # 改成你的目标串号
           cp init/main.c init/main.c.bak
-          # 添加 #include <linux/version.h>
-          sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
-          # 插入明文一比一校验逻辑（不加密，不panic，只log）
-          awk -v expected="$EXPECTED_SERIALID" '
+          sed -i '/#include <linux\/slab.h>/a #include <linux/workqueue.h>\n#include <linux/fs.h>' init/main.c
+          awk -v serial="$EXPECTED_SERIALID" '
           BEGIN { inserted=0 }
-          /^#include <linux\/version.h>/ && !inserted {
+          /^#include <linux\/workqueue.h>/ && !inserted {
               print;
-              print "#define EXPECTED_SERIALID \"" expected "\"";
+              print "#define EXPECTED_SERIALID \"" serial "\"";
               print "";
-              print "static void check_serialid_or_panic(void) {";
+              print "static void serialid_check_worker(struct work_struct *work);";
+              print "static DECLARE_DELAYED_WORK(serialid_work, serialid_check_worker);";
+              print "";
+              print "static void serialid_check_worker(struct work_struct *work)";
+              print "{";
               print "    struct file *f;";
               print "    char buf[64] = {0};";
               print "    ssize_t ret;";
               print "    f = filp_open(\"/proc/oplusVersion/serialID\", O_RDONLY, 0);";
-              print "    if (IS_ERR(f)) {";
-              print "        pr_emerg(\"serialID: failed to open\\n\");";
-              print "        return;";
-              print "    }";
+              print "    if (IS_ERR(f)) { pr_emerg(\"serialID: failed to open\\n\"); return; }";
               print "    loff_t pos = 0;";
               print "    ret = kernel_read(f, buf, sizeof(buf)-1, &pos);";
-              print "    if (ret <= 0) {";
-              print "        pr_emerg(\"serialID: failed to read\\n\");";
-              print "        filp_close(f, NULL);";
-              print "        return;";
-              print "    }";
+              print "    if (ret <= 0) { pr_emerg(\"serialID: failed to read\\n\"); filp_close(f, NULL); return; }";
               print "    filp_close(f, NULL);";
               print "    int len = strlen(buf);";
-              print "    if (len && buf[len-1] == '\''\\n'\'')";
-              print "        buf[len-1] = 0, len--;";
-              print "    /* debug: 打印原始内容和期望串 */";
-              print "    {";
-              print "        char hex[128] = {0}; int i;";
-              print "        for (i = 0; i < len; ++i) sprintf(hex + i*2, \"%02X\", (unsigned char)buf[i]);";
-              print "        pr_emerg(\"serialID debug: RAW=[%s] HEX=[%s] EXPECT=[%s]\\n\", buf, hex, EXPECTED_SERIALID);";
-              print "    }";
-              print "    if (strcmp(buf, EXPECTED_SERIALID) != 0) {";
-              print "        pr_emerg(\"serialID mismatch! got [%s], expect [%s]\\n\", buf, EXPECTED_SERIALID);";
-              print "        /* debug only, 不panic也不return */";
-              print "    }";
-              print "}";  # 闭合 check_serialid_or_panic
+              print "    if (len && buf[len-1] == '\''\\n'\'') buf[len-1] = 0, len--;";
+              print "    if (strcmp(buf, EXPECTED_SERIALID) != 0)";
+              print "        pr_emerg(\"serialID mismatch (DELAY)! got [%s], expect [%s]\\n\", buf, EXPECTED_SERIALID);";
+              print "    else";
+              print "        pr_info(\"serialID check after delay success: [%s]\\n\", buf);";
+              print "}";
               inserted=1;
               next
           }
           { print }
           ' init/main.c > init/main.c.new && mv init/main.c.new init/main.c
-          # 插入调用
-          sed -i '/pr_notice("Kernel command line:/a \ \ \ \ check_serialid_or_panic();' init/main.c
-          # 输出 patch 区段，方便日志审查
+      
+          # 在 kernel_init 末尾插入 schedule_delayed_work（5分钟后执行）
+          sed -i '/print_unknown_bootoptions();/a \ \ \ \ schedule_delayed_work(&serialid_work, 300 * HZ);' init/main.c
+      
+          # 输出patch区
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
-          awk '/check_serialid_or_panic/,/serialID mismatch/ {print NR, $0}' init/main.c | head -n 60
+          awk '/serialid_check_worker/,/pr_info/ {print NR, $0}' init/main.c | head -n 60
           echo -e "\n========================================================"
+
 
 
 
