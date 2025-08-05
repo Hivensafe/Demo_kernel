@@ -1,0 +1,267 @@
+name: testyaml
+on:
+  workflow_dispatch:
+    inputs:
+      REPO_MANIFEST:
+        description: "📝请选择要编译的机型："
+        required: true
+        type: choice
+        options:
+          - 'oneplus_13'
+          - 'oneplus_ace5_pro'
+          - 'oneplus_13t'
+          - 'oneplus_pad_2_pro'
+          - 'oneplus_pad_2_pro_New'
+          - 'oneplus_ace5_ultra'
+          - 'realme_GT7pro'
+          - 'realme_GT7pro_Speed'
+        default: 'oneplus_ace5_pro'
+
+      keep_original_settings:
+        description: "📝保持原内核名称及构建时间(不懂请保持默认)"
+        required: false
+        default: true
+        type: boolean
+
+      custom_kernel_suffix:
+        description: "✏️ 自定义内核名称- 仅在取消勾选'保持原设置'时有效(不懂请保持默认)"
+        required: false
+        default: ''
+      
+      custom_kernel_time:
+        description: "⏰ 自定义构建时间- 仅在取消勾选'保持原设置'时有效(不懂请保持默认)"
+        required: false
+        default: ''
+
+      enable_feature_z:
+        description: "添加风驰驱动"
+        required: false
+        default: true
+        type: boolean
+
+      enable_feature_b:
+         description: "添加BBR控制算法"
+         required: false
+         default: false
+         type: boolean
+      
+       
+
+
+jobs:
+  build:
+    name: Build_${{ github.event.inputs.REPO_MANIFEST }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 📊 Check disk space (检查磁盘空间)
+        run: |
+          echo "构建前磁盘空间："
+          df -h
+      
+      - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
+        id: set_manifest
+        run: |
+          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          chmod +x main.bin
+          ./main.bin "setup_device_info" "${{ github.event.inputs.REPO_MANIFEST }}"
+          rm -rf ./main.bin
+          
+      - name: ⚙️ Set KERNEL_TIME (设置构建时间)
+        id: set_kernel_time
+        run: |
+          if [ "$KEEP_ORIGINAL" = "false" ] && [ -n "$CUSTOM_TIME" ]; then
+            echo "使用自定义构建时间: $CUSTOM_TIME"
+            echo "KERNEL_TIME=$CUSTOM_TIME" >> $GITHUB_ENV
+          else
+            case "$DEVICES_NAME" in
+              oneplus_13 | oneplus_ace5_pro | realme_GT7pro | realme_GT7pro_Speed)
+                echo 'KERNEL_TIME=Tue Dec 17 23:36:49 UTC 2024' >> $GITHUB_ENV
+                ;;
+              oneplus_13t)
+                echo 'KERNEL_TIME=FriApr 25 01:56:53 UTC 2025' >> $GITHUB_ENV
+                ;;
+              oneplus_pad_2_pro)
+                echo 'KERNEL_TIME=Wed Dec 11 19:16:38 UTC 2024' >> $GITHUB_ENV
+                ;;
+              oneplus_ace5_ultra)
+                echo 'KERNEL_TIME=Fri Apr 18 19:35:07 UTC 2025' >> $GITHUB_ENV
+                ;;
+              oneplus_pad_2_pro_New)
+                echo 'KERNEL_TIME=Tue Mar 4 09:04:13 UTC 2025' >> $GITHUB_ENV
+                ;;
+            esac
+          fi
+
+      - name: ⚙️ Set device-specific CCACHE_DIR (设置对应机型Cceche路径)
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache_${REPO_MANIFEST}" >> $GITHUB_ENV
+
+      - name: 📦 Configure Git (设置下载账户)
+        run: |
+          git config --global user.name "Q1udaoyu"
+          git config --global user.email "sucisama2888@gmail.com"
+
+      - name: 🛠 Configure APT caching (配置APT缓存)
+        run: |
+          APT_CACHE_DIR="$HOME/apt-cache"
+          mkdir -p "$APT_CACHE_DIR"/{archives,lists/partial}
+          echo "Dir::Cache \"$APT_CACHE_DIR\";" | sudo tee /etc/apt/apt.conf.d/90user-cache
+          echo "Dir::Cache::archives \"$APT_CACHE_DIR/archives\";" | sudo tee -a /etc/apt/apt.conf.d/90user-cache
+          echo "Dir::State::lists \"$APT_CACHE_DIR/lists\";" | sudo tee -a /etc/apt/apt.conf.d/90user-cache
+          echo "Acquire::Check-Valid-Until \"false\";" | sudo tee -a /etc/apt/apt.conf.d/90user-cache
+          echo "Acquire::Languages \"none\";" | sudo tee -a /etc/apt/apt.conf.d/90user-cache
+          sudo chown -R $USER:$USER "$APT_CACHE_DIR"
+
+      - name: 🛠 Cache APT packages (缓存APT包)
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.HOME }}/apt-cache
+          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/Build_oneplus_sm875-Image.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
+
+      - name: 📦 Install dependencies (安装依赖)
+        run: |
+          sudo rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock
+          APT_CACHE_DIR="$HOME/apt-cache"
+          mkdir -p "$APT_CACHE_DIR/lists/partial"
+          sudo apt -o Dir::Cache="$APT_CACHE_DIR" update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt -o Dir::Cache="$APT_CACHE_DIR" install -yq --no-install-recommends \
+            python3 p7zip-full git curl ccache libelf-dev \
+            build-essential libelf-dev flex bison libssl-dev \
+            libncurses-dev liblz4-tool zlib1g-dev \
+            libxml2-utils rsync unzip
+          
+          echo "✅ 依赖安装完成"
+          
+      - name: 📥 Restore ccache (载入 机型：${{ env.DEVICES_NAME }}的 ccache 缓存)
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ github.ref }}-${{ env.REPO_MANIFEST }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ env.REPO_MANIFEST }}-
+            ccache-${{ runner.os }}-
+
+      - name: 📥 Init ccache (如果是第一次运行则初始化Cceche)
+        run: |
+          export CCACHE_COMPILERCHECK="%compiler% -dumpmachine; %compiler% -dumpversion"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_HARDLINK="true"
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_MAXSIZE="8G"
+
+          INIT_FLAG="$CCACHE_DIR/.ccache_initialized"
+          if command -v ccache >/dev/null 2>&1; then
+            if [ ! -f "$INIT_FLAG" ]; then
+              echo "初始化 ccache ($CCACHE_DIR)..."
+              mkdir -p "$CCACHE_DIR"
+              ccache -M "$CCACHE_MAXSIZE"
+              touch "$INIT_FLAG"
+            else
+              echo "ccache 已初始化，跳过"
+            fi
+          else
+            echo "未安装 ccache，跳过"
+          fi
+
+
+      - name: 📥 Install repo tool (下载repo工具)
+        run: |
+         curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+         chmod a+x ~/repo
+         sudo mv ~/repo /usr/local/bin/repo
+
+      - name: 📥 Initialize repo and sync (初始化repo并同步内核源码)
+        run: |
+         mkdir kernel_workspace && cd kernel_workspace
+         repo init -u https://github.com/showdo/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m ${REPO_MANIFEST}.xml --depth=1
+         repo --trace sync -c -j$(nproc --all) --no-tags
+         rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+         rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+
+      - name: Patch main.c for serialID base64 check (safe version, no extra parenthesis)
+        working-directory: kernel_workspace/kernel_platform/common
+        run: |
+          BASE64_SERIAL="MHg0ODhlM2I0NQ=="
+          cp init/main.c init/main.c.bak
+          # 添加 #include <linux/version.h>
+          sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
+          # 插入 base64 校验逻辑
+          awk -v b64_serial="$BASE64_SERIAL" '
+          BEGIN { inserted=0 }
+          /^#include <linux\/version.h>/ && !inserted {
+              print;
+              print "static const char b64_table[] = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";";
+              print "";
+              print "static void base64_encode(const unsigned char *src, int src_len, char *dst)";
+              print "{";
+              print "    int i, j;";
+              print "    for (i = 0, j = 0; i < src_len;) {";  # 必须合一行！
+              print "        uint32_t octet_a = i < src_len ? src[i++] : 0;";
+              print "        uint32_t octet_b = i < src_len ? src[i++] : 0;";
+              print "        uint32_t octet_c = i < src_len ? src[i++] : 0;";
+              print "        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;";
+              print "        dst[j++] = b64_table[(triple >> 18) & 0x3F];";
+              print "        dst[j++] = b64_table[(triple >> 12) & 0x3F];";
+              print "        dst[j++] = b64_table[(triple >> 6) & 0x3F];";
+              print "        dst[j++] = b64_table[(triple) & 0x3F];";
+              print "    }";
+              print "    int mod = src_len % 3;";
+              print "    if (mod) {";
+              print "        dst[j - 1] = '\''='\'';";
+              print "        if (mod == 1)";
+              print "            dst[j - 2] = '\''='\'';";
+              print "    }";
+              print "    dst[j] = 0;";
+              print "}";
+              print "";
+              print "#define EXPECTED_B64_SERIAL \"" b64_serial "\"";
+              print "";
+              print "static void check_serialid_or_panic(void)";
+              print "{";
+              print "    struct file *f;";
+              print "    char buf[64] = {0};";
+              print "    char b64buf[128] = {0};";
+              print "    ssize_t ret;";
+              print "    f = filp_open(\"/proc/oplusVersion/serialID\", O_RDONLY, 0);";
+              print "    if (IS_ERR(f)) {";
+              print "        pr_emerg(\"serialID: failed to open\\n\");";
+              print "        goto fail;";
+              print "    }";
+              print "    loff_t pos = 0;";
+              print "    ret = kernel_read(f, buf, sizeof(buf)-1, &pos);";
+              print "    if (ret <= 0) {";
+              print "        pr_emerg(\"serialID: failed to read\\n\");";
+              print "        filp_close(f, NULL);";
+              print "        goto fail;";
+              print "    }";
+              print "    filp_close(f, NULL);";
+              print "    int len = strlen(buf);";
+              print "    if (len && buf[len-1] == '\\n')";
+              print "        buf[len-1] = 0, len--;";
+              print "    base64_encode((unsigned char*)buf, len, b64buf);";
+              print "    if (strcmp(b64buf, EXPECTED_B64_SERIAL) != 0) {";
+              print "        pr_emerg(\"serialID mismatch! got [%s]=>[%s], expect [%s]\\n\", buf, b64buf, EXPECTED_B64_SERIAL);";
+              print "        goto fail;";
+              print "    }";
+              print "    return;";
+              print "fail:";
+              print "    panic(\"Device serialID check failed! Refuse to boot.\\n\");";
+              print "}";  # 闭合 check_serialid_or_panic
+              inserted=1;
+              next
+          }
+          { print }
+          ' init/main.c > init/main.c.new && mv init/main.c.new init/main.c
+          # 插入调用
+          sed -i '/pr_notice("Kernel command line:/a \ \ \ \ check_serialid_or_panic();' init/main.c
+          
+      - name: 📤 Upload AnyKernel3 (上传 Anykernel3)
+        uses: actions/upload-artifact@v4
+        with:
+         name: su
+         path: kernel_workspace/kernel_platform/common/init/main.c
