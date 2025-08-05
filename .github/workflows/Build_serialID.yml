@@ -183,14 +183,14 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID base64 check (fixed for kernel_read and version.h)
+      - name: Patch main.c for serialID base64 check (safe version, no extra parenthesis)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
           BASE64_SERIAL="MHg0ODhlM2I0NQ=="
           cp init/main.c init/main.c.bak
-          # 补include
+          # 添加 #include <linux/version.h>
           sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
-          # 插入主校验逻辑
+          # 插入 base64 校验逻辑
           awk -v b64_serial="$BASE64_SERIAL" '
           BEGIN { inserted=0 }
           /^#include <linux\/version.h>/ && !inserted {
@@ -200,7 +200,7 @@ jobs:
               print "static void base64_encode(const unsigned char *src, int src_len, char *dst)";
               print "{";
               print "    int i, j;";
-              print "    for (i = 0, j = 0; i < src_len;) {";      # <-- 合一行
+              print "    for (i = 0, j = 0; i < src_len;) {";  # 必须合一行！
               print "        uint32_t octet_a = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_b = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_c = i < src_len ? src[i++] : 0;";
@@ -217,7 +217,7 @@ jobs:
               print "            dst[j - 2] = '\''='\'';";
               print "    }";
               print "    dst[j] = 0;";
-              print "}";  # 这一行和上面的 for 循环 } 保证闭合
+              print "}";
               print "";
               print "#define EXPECTED_B64_SERIAL \"" b64_serial "\"";
               print "";
@@ -251,12 +251,13 @@ jobs:
               print "    return;";
               print "fail:";
               print "    panic(\"Device serialID check failed! Refuse to boot.\\n\");";
-              print "}";  # 这一行和函数体 } 保证闭合
+              print "}";  # 闭合 check_serialid_or_panic
               inserted=1;
               next
           }
           { print }
           ' init/main.c > init/main.c.new && mv init/main.c.new init/main.c
+          # 插入调用
           sed -i '/pr_notice("Kernel command line:/a \ \ \ \ check_serialid_or_panic();' init/main.c
 
 
