@@ -183,15 +183,19 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for delayed serialID check (3min, panic on fail)
+      - name: Patch main.c for delayed serialID check (3min, reboot on fail)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SERIALID="0x488e3b46"  # 改成你的 serialID
+          EXPECTED_SERIALID="0x488a3e45"  # 改成你要的目标 serialID
           cp init/main.c init/main.c.bak
-          sed -i '/#include <linux\/slab.h>/a #include <linux/workqueue.h>\n#include <linux/fs.h>' init/main.c
+      
+          # 插入所需 include
+          sed -i '/#include <linux\/slab.h>/a #include <linux/workqueue.h>\n#include <linux/fs.h>\n#include <linux/reboot.h>' init/main.c
+      
+          # 插入 delayed_work 校验逻辑
           awk -v serial="$EXPECTED_SERIALID" '
           BEGIN { inserted=0 }
-          /^#include <linux\/workqueue.h>/ && !inserted {
+          /^#include <linux\/reboot.h>/ && !inserted {
               print;
               print "#define EXPECTED_SERIALID \"" serial "\"";
               print "";
@@ -205,24 +209,25 @@ jobs:
               print "    ssize_t ret;";
               print "    f = filp_open(\"/proc/oplusVersion/serialID\", O_RDONLY, 0);";
               print "    if (IS_ERR(f)) {";
-              print "        pr_emerg(\"serialID: failed to open\\n\");";
-              print "        panic(\"serialID: failed to open\\n\");";
+              print "        pr_info(\"serialID: failed to open\\n\");";
+              print "        kernel_restart(NULL);";
               print "        return;";
               print "    }";
               print "    loff_t pos = 0;";
               print "    ret = kernel_read(f, buf, sizeof(buf)-1, &pos);";
               print "    if (ret <= 0) {";
-              print "        pr_emerg(\"serialID: failed to read\\n\");";
+              print "        pr_info(\"serialID: failed to read\\n\");";
               print "        filp_close(f, NULL);";
-              print "        panic(\"serialID: failed to read\\n\");";
+              print "        kernel_restart(NULL);";
               print "        return;";
               print "    }";
               print "    filp_close(f, NULL);";
               print "    int len = strlen(buf);";
               print "    if (len && buf[len-1] == '\''\\n'\'') buf[len-1] = 0, len--;";
+              print "    pr_info(\"serialID debug: [%s] expect [%s]\\n\", buf, EXPECTED_SERIALID);";
               print "    if (strcmp(buf, EXPECTED_SERIALID) != 0) {";
-              print "        pr_emerg(\"serialID mismatch after delay! got [%s], expect [%s]\\n\", buf, EXPECTED_SERIALID);";
-              print "        panic(\"Device serialID check failed after delay! Refuse to boot.\\n\");";
+              print "        pr_emerg(\"serialID mismatch! Rebooting...\\n\");";
+              print "        kernel_restart(NULL);";
               print "    } else {";
               print "        pr_info(\"serialID check after delay success: [%s]\\n\", buf);";
               print "    }";
@@ -236,10 +241,11 @@ jobs:
           # 在 kernel_init 末尾插入 schedule_delayed_work（3分钟后执行）
           sed -i '/print_unknown_bootoptions();/a \ \ \ \ schedule_delayed_work(&serialid_work, 180 * HZ);' init/main.c
       
-          # 输出patch区
+          # 输出 patch 片段
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
           awk '/serialid_check_worker/,/pr_info/ {print NR, $0}' init/main.c | head -n 60
           echo -e "\n========================================================"
+
 
 
 
