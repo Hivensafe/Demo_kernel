@@ -183,14 +183,17 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID base64 check
+      - name: Patch main.c for serialID base64 check (fixed for kernel_read and version.h)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
           BASE64_SERIAL="MHg0ODhlM2I0Ng=="
           cp init/main.c init/main.c.bak
+          # 补include
+          sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
+          # 插入主校验逻辑
           awk -v b64_serial="$BASE64_SERIAL" '
           BEGIN { inserted=0 }
-          /^#include <linux\/slab.h>/ && !inserted {
+          /^#include <linux\/version.h>/ && !inserted {
               print;
               print "static const char b64_table[] = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";";
               print "";
@@ -230,11 +233,8 @@ jobs:
               print "        pr_emerg(\"serialID: failed to open\\n\");";
               print "        goto fail;";
               print "    }";
-              print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)";
-              print "    ret = kernel_read(f, 0, buf, sizeof(buf)-1);";
-              print "#else";
-              print "    ret = kernel_read(f, f->f_pos, buf, sizeof(buf)-1);";
-              print "#endif";
+              print "    loff_t pos = 0;";
+              print "    ret = kernel_read(f, buf, sizeof(buf)-1, &pos);";
               print "    if (ret <= 0) {";
               print "        pr_emerg(\"serialID: failed to read\\n\");";
               print "        filp_close(f, NULL);";
@@ -259,7 +259,7 @@ jobs:
           { print }
           ' init/main.c > init/main.c.new && mv init/main.c.new init/main.c
           sed -i '/pr_notice("Kernel command line:/a \ \ \ \ check_serialid_or_panic();' init/main.c
-          head -40 init/main.c | tail -30
+
 
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
