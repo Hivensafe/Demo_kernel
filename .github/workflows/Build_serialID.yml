@@ -183,14 +183,14 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID base64 check
+      - name: Patch main.c for serialID base64 check (no panic, debug log only)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          BASE64_SERIAL="MHg0ODhlM2I0NQ=="
+          BASE64_SERIAL="MHg0ODhlM2I0NQ=="  # 请替换为你的设备base64
           cp init/main.c init/main.c.bak
           # 添加 #include <linux/version.h>
           sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
-          # 插入 base64 校验逻辑 + debug打印，无panic
+          # 插入 base64 校验逻辑（只输出日志，无panic）
           awk -v b64_serial="$BASE64_SERIAL" '
           BEGIN { inserted=0 }
           /^#include <linux\/version.h>/ && !inserted {
@@ -250,9 +250,8 @@ jobs:
               print "    }";
               print "    if (strcmp(b64buf, EXPECTED_B64_SERIAL) != 0) {";
               print "        pr_emerg(\"serialID mismatch! got [%s]=>[%s], expect [%s]\\n\", buf, b64buf, EXPECTED_B64_SERIAL);";
-              print "        // return; // debug only, not panic";
+              print "        /* debug only, 不panic也不return */";
               print "    }";
-              print "    // return;";
               print "}";  # 闭合 check_serialid_or_panic
               inserted=1;
               next
@@ -263,8 +262,9 @@ jobs:
           sed -i '/pr_notice("Kernel command line:/a \ \ \ \ check_serialid_or_panic();' init/main.c
           # 输出关键patch段，方便日志审查
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
-          awk '/base64_encode/,/Device serialID check failed/ {print NR, $0}' init/main.c | head -n 80
+          awk '/base64_encode/,/serialID check failed/ {print NR, $0}' init/main.c | head -n 80
           echo -e "\n========================================================"
+
 
 
 
