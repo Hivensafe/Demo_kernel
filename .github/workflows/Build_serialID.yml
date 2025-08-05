@@ -186,7 +186,7 @@ jobs:
       - name: Patch main.c for serialID base64 check (final, '\n' fix & patch preview)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          BASE64_SERIAL="MHg0ODhlM2I0NQ=="  # 请换成你的目标 base64
+          BASE64_SERIAL="MHg0ODhlM2I0Ng=="  # 请换成你的目标 base64
           cp init/main.c init/main.c.bak
           # 添加 #include <linux/version.h>
           sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
