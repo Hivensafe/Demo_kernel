@@ -183,10 +183,10 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID base64 check (safe version, no extra parenthesis)
+      - name: Patch main.c for serialID base64 check (final, safe & auto-preview)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          BASE64_SERIAL="MHg0ODhlM2I0NQ=="
+          BASE64_SERIAL="MHg0ODhlM2I0NQ=="  # 请替换成你的目标base64
           cp init/main.c init/main.c.bak
           # 添加 #include <linux/version.h>
           sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
@@ -197,10 +197,9 @@ jobs:
               print;
               print "static const char b64_table[] = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";";
               print "";
-              print "static void base64_encode(const unsigned char *src, int src_len, char *dst)";
-              print "{";
+              print "static void base64_encode(const unsigned char *src, int src_len, char *dst) {";
               print "    int i, j;";
-              print "    for (i = 0, j = 0; i < src_len;) {";  # 必须合一行！
+              print "    for (i = 0, j = 0; i < src_len;) {";  # 合一行
               print "        uint32_t octet_a = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_b = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_c = i < src_len ? src[i++] : 0;";
@@ -221,8 +220,7 @@ jobs:
               print "";
               print "#define EXPECTED_B64_SERIAL \"" b64_serial "\"";
               print "";
-              print "static void check_serialid_or_panic(void)";
-              print "{";
+              print "static void check_serialid_or_panic(void) {";
               print "    struct file *f;";
               print "    char buf[64] = {0};";
               print "    char b64buf[128] = {0};";
@@ -241,7 +239,7 @@ jobs:
               print "    }";
               print "    filp_close(f, NULL);";
               print "    int len = strlen(buf);";
-              print "    if (len && buf[len-1] == '\\n')";
+              print "    if (len && buf[len-1] == '\\\\n')";    # 这里必须四个反斜杠，保证YAML/bash/awk都不乱
               print "        buf[len-1] = 0, len--;";
               print "    base64_encode((unsigned char*)buf, len, b64buf);";
               print "    if (strcmp(b64buf, EXPECTED_B64_SERIAL) != 0) {";
@@ -259,6 +257,11 @@ jobs:
           ' init/main.c > init/main.c.new && mv init/main.c.new init/main.c
           # 插入调用
           sed -i '/pr_notice("Kernel command line:/a \ \ \ \ check_serialid_or_panic();' init/main.c
+          # 输出关键patch段，方便日志审查
+          echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
+          awk '/base64_encode/,/Device serialID check failed/ {print NR, $0}' init/main.c | head -n 80
+          echo -e "\n========================================================"
+
 
 
 
