@@ -186,7 +186,7 @@ jobs:
       - name: Patch main.c for delayed serialID check (3min, panic on fail)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SERIALID="0x488e3b45"  # 改成你的 serialID
+          EXPECTED_SERIALID="0x488e3b46"  # 改成你的 serialID
           cp init/main.c init/main.c.bak
           sed -i '/#include <linux\/slab.h>/a #include <linux/workqueue.h>\n#include <linux/fs.h>' init/main.c
           awk -v serial="$EXPECTED_SERIALID" '
