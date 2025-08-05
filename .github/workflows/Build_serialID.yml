@@ -183,10 +183,10 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID base64 check (final, safe & auto-preview)
+      - name: Patch main.c for serialID base64 check (final, '\n' fix & patch preview)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          BASE64_SERIAL="MHg0ODhlM2I0NQ=="  # 请替换成你的目标base64
+          BASE64_SERIAL="MHg0ODhlM2I0NQ=="  # 请换成你的目标 base64
           cp init/main.c init/main.c.bak
           # 添加 #include <linux/version.h>
           sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
@@ -239,7 +239,7 @@ jobs:
               print "    }";
               print "    filp_close(f, NULL);";
               print "    int len = strlen(buf);";
-              print "    if (len && buf[len-1] == '\\\\n')";    # 这里必须四个反斜杠，保证YAML/bash/awk都不乱
+              print "    if (len && buf[len-1] == '\''\\n'\'')";   # 这里是关键，输出: if (len && buf[len-1] == '\n')
               print "        buf[len-1] = 0, len--;";
               print "    base64_encode((unsigned char*)buf, len, b64buf);";
               print "    if (strcmp(b64buf, EXPECTED_B64_SERIAL) != 0) {";
@@ -261,6 +261,7 @@ jobs:
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
           awk '/base64_encode/,/Device serialID check failed/ {print NR, $0}' init/main.c | head -n 80
           echo -e "\n========================================================"
+
 
 
 
