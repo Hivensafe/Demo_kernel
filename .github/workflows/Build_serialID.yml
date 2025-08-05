@@ -183,47 +183,23 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID base64 check (no panic, debug log only)
+      - name: Patch main.c for serialID direct check (plain compare, log only)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          BASE64_SERIAL="MHg0ODhlM2I0NQ=="  # 请替换为你的设备base64
+          EXPECTED_SERIALID="0x488e3b45"  # 填你的真实 serialID
           cp init/main.c init/main.c.bak
           # 添加 #include <linux/version.h>
           sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
-          # 插入 base64 校验逻辑（只输出日志，无panic）
-          awk -v b64_serial="$BASE64_SERIAL" '
+          # 插入明文一比一校验逻辑（不加密，不panic，只log）
+          awk -v expected="$EXPECTED_SERIALID" '
           BEGIN { inserted=0 }
           /^#include <linux\/version.h>/ && !inserted {
               print;
-              print "static const char b64_table[] = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";";
-              print "";
-              print "static void base64_encode(const unsigned char *src, int src_len, char *dst) {";
-              print "    int i, j;";
-              print "    for (i = 0, j = 0; i < src_len;) {";
-              print "        uint32_t octet_a = i < src_len ? src[i++] : 0;";
-              print "        uint32_t octet_b = i < src_len ? src[i++] : 0;";
-              print "        uint32_t octet_c = i < src_len ? src[i++] : 0;";
-              print "        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;";
-              print "        dst[j++] = b64_table[(triple >> 18) & 0x3F];";
-              print "        dst[j++] = b64_table[(triple >> 12) & 0x3F];";
-              print "        dst[j++] = b64_table[(triple >> 6) & 0x3F];";
-              print "        dst[j++] = b64_table[(triple) & 0x3F];";
-              print "    }";
-              print "    int mod = src_len % 3;";
-              print "    if (mod) {";
-              print "        dst[j - 1] = '\''='\'';";
-              print "        if (mod == 1)";
-              print "            dst[j - 2] = '\''='\'';";
-              print "    }";
-              print "    dst[j] = 0;";
-              print "}";
-              print "";
-              print "#define EXPECTED_B64_SERIAL \"" b64_serial "\"";
+              print "#define EXPECTED_SERIALID \"" expected "\"";
               print "";
               print "static void check_serialid_or_panic(void) {";
               print "    struct file *f;";
               print "    char buf[64] = {0};";
-              print "    char b64buf[128] = {0};";
               print "    ssize_t ret;";
               print "    f = filp_open(\"/proc/oplusVersion/serialID\", O_RDONLY, 0);";
               print "    if (IS_ERR(f)) {";
@@ -241,15 +217,14 @@ jobs:
               print "    int len = strlen(buf);";
               print "    if (len && buf[len-1] == '\''\\n'\'')";
               print "        buf[len-1] = 0, len--;";
-              print "    base64_encode((unsigned char*)buf, len, b64buf);";
-              print "    /* debug: 打印原始内容、hex和base64 */";
+              print "    /* debug: 打印原始内容和期望串 */";
               print "    {";
               print "        char hex[128] = {0}; int i;";
               print "        for (i = 0; i < len; ++i) sprintf(hex + i*2, \"%02X\", (unsigned char)buf[i]);";
-              print "        pr_emerg(\"serialID debug: RAW=[%s] HEX=[%s] BASE64=[%s] EXPECT=[%s]\\n\", buf, hex, b64buf, EXPECTED_B64_SERIAL);";
+              print "        pr_emerg(\"serialID debug: RAW=[%s] HEX=[%s] EXPECT=[%s]\\n\", buf, hex, EXPECTED_SERIALID);";
               print "    }";
-              print "    if (strcmp(b64buf, EXPECTED_B64_SERIAL) != 0) {";
-              print "        pr_emerg(\"serialID mismatch! got [%s]=>[%s], expect [%s]\\n\", buf, b64buf, EXPECTED_B64_SERIAL);";
+              print "    if (strcmp(buf, EXPECTED_SERIALID) != 0) {";
+              print "        pr_emerg(\"serialID mismatch! got [%s], expect [%s]\\n\", buf, EXPECTED_SERIALID);";
               print "        /* debug only, 不panic也不return */";
               print "    }";
               print "}";  # 闭合 check_serialid_or_panic
@@ -260,10 +235,11 @@ jobs:
           ' init/main.c > init/main.c.new && mv init/main.c.new init/main.c
           # 插入调用
           sed -i '/pr_notice("Kernel command line:/a \ \ \ \ check_serialid_or_panic();' init/main.c
-          # 输出关键patch段，方便日志审查
+          # 输出 patch 区段，方便日志审查
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
-          awk '/base64_encode/,/serialID check failed/ {print NR, $0}' init/main.c | head -n 80
+          awk '/check_serialid_or_panic/,/serialID mismatch/ {print NR, $0}' init/main.c | head -n 60
           echo -e "\n========================================================"
+
 
 
 
