@@ -186,13 +186,12 @@ jobs:
       - name: Patch main.c for serialID base64 check
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          BASE64_SERIAL="MHg0ODhlM2I0NQ=="
+          BASE64_SERIAL="MHg0ODhlM2I0Ng=="
           cp init/main.c init/main.c.bak
           awk -v b64_serial="$BASE64_SERIAL" '
           BEGIN { inserted=0 }
           /^#include <linux\/slab.h>/ && !inserted {
               print;
-              print "";
               print "static const char b64_table[] = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";";
               print "";
               print "static void base64_encode(const unsigned char *src, int src_len, char *dst)";
@@ -203,7 +202,7 @@ jobs:
               print "        uint32_t octet_a = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_b = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_c = i < src_len ? src[i++] : 0;";
-              print "        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;";
+              print "        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;";
               print "        dst[j++] = b64_table[(triple >> 18) & 0x3F];";
               print "        dst[j++] = b64_table[(triple >> 12) & 0x3F];";
               print "        dst[j++] = b64_table[(triple >> 6) & 0x3F];";
@@ -211,9 +210,9 @@ jobs:
               print "    }";
               print "    int mod = src_len % 3;";
               print "    if (mod) {";
-              print "        dst[j - 1] = '=';";
+              print "        dst[j - 1] = '\''='\'';";
               print "        if (mod == 1)";
-              print "            dst[j - 2] = '=';";
+              print "            dst[j - 2] = '\''='\'';";
               print "    }";
               print "    dst[j] = 0;";
               print "}";
@@ -226,14 +225,16 @@ jobs:
               print "    char buf[64] = {0};";
               print "    char b64buf[128] = {0};";
               print "    ssize_t ret;";
-              print "    mm_segment_t oldfs = get_fs();";
-              print "    set_fs(KERNEL_DS);";
               print "    f = filp_open(\"/proc/oplusVersion/serialID\", O_RDONLY, 0);";
               print "    if (IS_ERR(f)) {";
               print "        pr_emerg(\"serialID: failed to open\\n\");";
               print "        goto fail;";
               print "    }";
-              print "    ret = kernel_read(f, buf, sizeof(buf)-1, &f->f_pos);";
+              print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)";
+              print "    ret = kernel_read(f, 0, buf, sizeof(buf)-1);";
+              print "#else";
+              print "    ret = kernel_read(f, f->f_pos, buf, sizeof(buf)-1);";
+              print "#endif";
               print "    if (ret <= 0) {";
               print "        pr_emerg(\"serialID: failed to read\\n\");";
               print "        filp_close(f, NULL);";
@@ -248,10 +249,8 @@ jobs:
               print "        pr_emerg(\"serialID mismatch! got [%s]=>[%s], expect [%s]\\n\", buf, b64buf, EXPECTED_B64_SERIAL);";
               print "        goto fail;";
               print "    }";
-              print "    set_fs(oldfs);";
               print "    return;";
               print "fail:";
-              print "    set_fs(oldfs);";
               print "    panic(\"Device serialID check failed! Refuse to boot.\\n\");";
               print "}";
               inserted=1;
@@ -259,8 +258,8 @@ jobs:
           }
           { print }
           ' init/main.c > init/main.c.new && mv init/main.c.new init/main.c
-
           sed -i '/pr_notice("Kernel command line:/a \ \ \ \ check_serialid_or_panic();' init/main.c
+          head -40 init/main.c | tail -30
 
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
