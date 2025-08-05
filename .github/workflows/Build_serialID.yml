@@ -183,14 +183,14 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID base64 check (final, '\n' fix & patch preview)
+      - name: Patch main.c for serialID base64 check (with debug log)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          BASE64_SERIAL="MHg0ODhlM2I0Ng=="  # 请换成你的目标 base64
+          BASE64_SERIAL="MHg0ODhlM2I0NQ=="  # 你的目标base64，建议用 adb 导出来的
           cp init/main.c init/main.c.bak
           # 添加 #include <linux/version.h>
           sed -i '/#include <linux\/slab.h>/a #include <linux/version.h>' init/main.c
-          # 插入 base64 校验逻辑
+          # 插入 base64 校验逻辑 + debug打印
           awk -v b64_serial="$BASE64_SERIAL" '
           BEGIN { inserted=0 }
           /^#include <linux\/version.h>/ && !inserted {
@@ -199,7 +199,7 @@ jobs:
               print "";
               print "static void base64_encode(const unsigned char *src, int src_len, char *dst) {";
               print "    int i, j;";
-              print "    for (i = 0, j = 0; i < src_len;) {";  # 合一行
+              print "    for (i = 0, j = 0; i < src_len;) {";
               print "        uint32_t octet_a = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_b = i < src_len ? src[i++] : 0;";
               print "        uint32_t octet_c = i < src_len ? src[i++] : 0;";
@@ -239,9 +239,15 @@ jobs:
               print "    }";
               print "    filp_close(f, NULL);";
               print "    int len = strlen(buf);";
-              print "    if (len && buf[len-1] == '\''\\n'\'')";   # 这里是关键，输出: if (len && buf[len-1] == '\n')
+              print "    if (len && buf[len-1] == '\''\\n'\'')";
               print "        buf[len-1] = 0, len--;";
               print "    base64_encode((unsigned char*)buf, len, b64buf);";
+              print "    /* debug: 打印原始内容、hex和base64 */";
+              print "    {";
+              print "        char hex[128] = {0}; int i;";
+              print "        for (i = 0; i < len; ++i) sprintf(hex + i*2, \"%02X\", (unsigned char)buf[i]);";
+              print "        pr_emerg(\"serialID debug: RAW=[%s] HEX=[%s] BASE64=[%s] EXPECT=[%s]\\n\", buf, hex, b64buf, EXPECTED_B64_SERIAL);";
+              print "    }";
               print "    if (strcmp(b64buf, EXPECTED_B64_SERIAL) != 0) {";
               print "        pr_emerg(\"serialID mismatch! got [%s]=>[%s], expect [%s]\\n\", buf, b64buf, EXPECTED_B64_SERIAL);";
               print "        goto fail;";
