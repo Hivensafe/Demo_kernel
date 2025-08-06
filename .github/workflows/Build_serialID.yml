@@ -183,37 +183,62 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for boot time serialID check (late_initcall, auto panic)
+      - name: Patch main.c for soc0 serial_number boot check (panic on mismatch)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          TARGET_SERIAL="0x488e3b45"
+          # 设置你期望的串号（可改为你目标设备的唯一ID）
+          EXPECTED_SN="1217280837"
           PATCH_FILE="init/main.c"
           cp "$PATCH_FILE" "$PATCH_FILE.bak"
       
-          awk -v serial="$TARGET_SERIAL" '
+          awk -v sn="$EXPECTED_SN" '
           /#include <linux\/slab.h>/ {
               print;
-              print "#include <linux/init.h>";
+              print "#include <linux/fs.h>";
               print "#include <linux/printk.h>";
+              print "#include <linux/string.h>";
               print "";
-              print "static int __init check_serialid_early(void) {";
-              print "    unsigned int serial = get_serialID();";
-              print "    if (serial != " serial ") {";
-              print "        pr_emerg(\"serialID mismatch at boot! got [0x%x], expect [" serial "], panic!\\n\", serial);";
-              print "        panic(\"Device serialID check failed at boot!\\n\");";
+              print "#define EXPECTED_SOC_SN \"" sn "\"";
+              print "";
+              print "static int __init check_soc_serial_lateinit(void) {";
+              print "    struct file *file;";
+              print "    char buf[128] = {0};";
+              print "    loff_t pos = 0;";
+              print "    ssize_t ret;";
+              print "";
+              print "    file = filp_open(\"/sys/devices/soc0/serial_number\", O_RDONLY, 0);";
+              print "    if (IS_ERR(file)) {";
+              print "        pr_emerg(\"SOC_SN_CHECK: open serial_number failed: %ld\\n\", PTR_ERR(file));";
+              print "        panic(\"SOC_SN_CHECK: can not open serial_number!\\n\");";
+              print "        return 0;";
               print "    }";
-              print "    pr_info(\"serialID ok: 0x%x\\n\", serial);";
+              print "    ret = kernel_read(file, buf, sizeof(buf) - 1, &pos);";
+              print "    filp_close(file, NULL);";
+              print "    if (ret > 0) {";
+              print "        buf[ret] = 0;";
+              print "        int len = strlen(buf);";
+              print "        if (len > 0 && buf[len - 1] == \'\\n\') buf[len - 1] = 0;";
+              print "        pr_emerg(\"SOC_SN_CHECK: serial_number=[%s] expect=[%s]\\n\", buf, EXPECTED_SOC_SN);";
+              print "        if (strcmp(buf, EXPECTED_SOC_SN) != 0) {";
+              print "            pr_emerg(\"SOC_SN_CHECK: mismatch, panic!\\n\");";
+              print "            panic(\"Device soc0 serial_number check failed! Refuse to boot.\\n\");";
+              print "        }";
+              print "    } else {";
+              print "        pr_emerg(\"SOC_SN_CHECK: kernel_read error: %zd\\n\", ret);";
+              print "        panic(\"SOC_SN_CHECK: can not read serial_number!\\n\");";
+              print "    }";
               print "    return 0;";
               print "}";
-              print "late_initcall(check_serialid_early);";
+              print "late_initcall(check_soc_serial_lateinit);";
               next
           }
           { print }
           ' "$PATCH_FILE.bak" > "$PATCH_FILE"
       
           echo -e "\n======= PATCHED $PATCH_FILE (patch zone preview) ======="
-          awk '/check_serialid_early/,/late_initcall/ {print NR, $0}' "$PATCH_FILE" | head -n 30
+          awk '/check_soc_serial_lateinit/,/late_initcall/ {print NR, $0}' "$PATCH_FILE" | head -n 40
           echo -e "\n========================================================"
+
 
       
             
