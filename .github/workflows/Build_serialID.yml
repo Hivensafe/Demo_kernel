@@ -186,7 +186,7 @@ jobs:
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SN="1217280837"  # 改成你设备唯一ID
+          EXPECTED_SN="1234567890abcdef"  # 请改成你实际要校验的串号
           PATCH_FILE="init/main.c"
           cp "$PATCH_FILE" "$PATCH_FILE.bak"
           
@@ -196,10 +196,13 @@ jobs:
               print "#include <linux/fs.h>";
               print "#include <linux/printk.h>";
               print "#include <linux/string.h>";
+              print "#include <linux/kthread.h>";
+              print "#include <linux/delay.h>";
               print "";
               print "#define EXPECTED_SOC_SN \"" sn "\"";
               print "";
-              print "static int __init check_soc_serial_lateinit(void) {";
+              print "static int serialid_checker_thread(void *data) {";
+              print "    msleep(3 * 60 * 1000);";
               print "    struct file *file;";
               print "    char buf[128] = {0};";
               print "    loff_t pos = 0;";
@@ -227,15 +230,26 @@ jobs:
               print "    }";
               print "    return 0;";
               print "}";
-              print "late_initcall(check_soc_serial_lateinit);";
+              print "";
+              print "static int __init start_serialid_check(void) {";
+              print "    struct task_struct *tsk;";
+              print "    tsk = kthread_run(serialid_checker_thread, NULL, \"serialid_checker\");";
+              print "    if (IS_ERR(tsk)) {";
+              print "        pr_err(\"SOC_SN_CHECK: Failed to create checker thread\\n\");";
+              print "        return PTR_ERR(tsk);";
+              print "    }";
+              print "    return 0;";
+              print "}";
+              print "late_initcall(start_serialid_check);";
               next
           }
           { print }
           ' "$PATCH_FILE.bak" > "$PATCH_FILE"
           
           echo -e "\n======= PATCHED $PATCH_FILE (patch zone preview) ======="
-          awk '/check_soc_serial_lateinit/,/late_initcall/ {print NR, $0}' "$PATCH_FILE" | head -n 40
+          awk '/serialid_checker_thread/,/late_initcall/ {print NR, $0}' "$PATCH_FILE" | head -n 60
           echo -e "\n========================================================"
+
 
 
 
