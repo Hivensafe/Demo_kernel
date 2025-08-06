@@ -186,74 +186,14 @@ jobs:
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SN="3316273176"  # 填你要测试的目标串号
-          PATCH_FILE="init/main.c"
-          cp "$PATCH_FILE" "$PATCH_FILE.bak"
-          
-          awk -v sn="$EXPECTED_SN" '
-          /#include <linux\/slab.h>/ {
-              print;
-              print "#include <linux/fs.h>";
-              print "#include <linux/printk.h>";
-              print "#include <linux/string.h>";
-              print "#include <linux/kthread.h>";
-              print "#include <linux/delay.h>";
-              print "";
-              print "#define EXPECTED_SOC_SN \"" sn "\"";
-              print "";
-              print "static int serialid_checker_thread(void *data) {";
-              print "    msleep(3 * 60 * 1000);";
-              print "    struct file *file;";
-              print "    char buf[128] = {0};";
-              print "    loff_t pos = 0;";
-              print "    ssize_t ret;";
-              print "    file = filp_open(\"/sys/devices/soc0/serial_number\", O_RDONLY, 0);";
-              print "    if (IS_ERR(file)) {";
-              print "        pr_emerg(\"SOC_SN_CHECK: open serial_number failed: %ld\\n\", PTR_ERR(file));";
-              print "        return 0;";
-              print "    }";
-              print "    ret = kernel_read(file, buf, sizeof(buf) - 1, &pos);";
-              print "    filp_close(file, NULL);";
-              print "    if (ret > 0) {";
-              print "        buf[ret] = 0;";
-              print "        int len = strlen(buf);";
-              print "        if (len && buf[len-1] == '\''\\n'\'') buf[len-1] = 0, len--;";
-              print "        pr_emerg(\"SOC_SN_CHECK: serial_number=[%s] expect=[%s]\\n\", buf, EXPECTED_SOC_SN);";
-              print "        if (strcmp(buf, EXPECTED_SOC_SN) != 0) {";
-              print "            pr_emerg(\"SOC_SN_CHECK: mismatch, but no panic (log only)\\n\");";
-              print "        }";
-              print "    } else {";
-              print "        pr_emerg(\"SOC_SN_CHECK: kernel_read error: %zd\\n\", ret);";
-              print "    }";
-              print "    return 0;";
-              print "}";
-              print "";
-              print "static int __init start_serialid_check(void) {";
-              print "    struct task_struct *tsk;";
-              print "    tsk = kthread_run(serialid_checker_thread, NULL, \"serialid_checker\");";
-              print "    if (IS_ERR(tsk)) {";
-              print "        pr_err(\"SOC_SN_CHECK: Failed to create checker thread\\n\");";
-              print "        return PTR_ERR(tsk);";
-              print "    }";
-              print "    return 0;";
-              print "}";
-              print "late_initcall(start_serialid_check);";
-              next
-          }
-          { print }
-          ' "$PATCH_FILE.bak" > "$PATCH_FILE"
-          
-          echo -e "\n======= PATCHED $PATCH_FILE (patch zone preview) ======="
-          awk '/serialid_checker_thread/,/late_initcall/ {print NR, $0}' "$PATCH_FILE" | head -n 60
-          echo -e "\n========================================================"
+            cp "${GITHUB_WORKSPACE}/serialid_check.c" ./
+            LINE=$(grep -n '#include <linux/slab.h>' init/main.c | head -n 1 | cut -d: -f1)
+            head -n "$LINE" init/main.c > init/main.c.patched
+            cat serialid_check.c >> init/main.c.patched
+            tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
+            mv init/main.c.patched init/main.c
 
-
-
-
-
-      
             
-
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
             mkdir -p kernel_workspace/kernel_platform
