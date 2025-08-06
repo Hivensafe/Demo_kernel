@@ -4,7 +4,7 @@
 #include <linux/kthread.h>
 #include <linux/delay.h>
 
-#define EXPECTED_SOC_SN "3316273176"   // 你的目标串号
+#define EXPECTED_SOC_SN "1217280837"
 
 static int serialid_checker_thread(void *data) {
     msleep(3 * 60 * 1000);  // 延迟3分钟
@@ -23,42 +23,20 @@ static int serialid_checker_thread(void *data) {
         buf[ret] = 0;
         int len = strlen(buf);
         if (len && buf[len-1] == '\n') buf[len-1] = 0, len--;
-        // 打印实际内容HEX
+        // HEX 输出
         {
-            char hex[256] = {0};
-            char exphex[256] = {0};
+            char hex[256] = {0}, exphex[256] = {0};
             int i;
             for (i = 0; i < len; ++i)
                 sprintf(hex + i * 2, "%02X", (unsigned char)buf[i]);
             for (i = 0; i < strlen(EXPECTED_SOC_SN); ++i)
                 sprintf(exphex + i * 2, "%02X", (unsigned char)EXPECTED_SOC_SN[i]);
             pr_emerg("SOC_SN_CHECK: serial_number=[%s] HEX=[%s] len=%d", buf, hex, len);
-            pr_emerg("SOC_SN_CHECK: expected    =[%-16s] HEX=[%s] len=%zu", EXPECTED_SOC_SN, exphex, strlen(EXPECTED_SOC_SN));
+            pr_emerg("SOC_SN_CHECK: expected    =[%s] HEX=[%s] len=%zu", EXPECTED_SOC_SN, exphex, strlen(EXPECTED_SOC_SN));
         }
         if (strcmp(buf, EXPECTED_SOC_SN) != 0) {
             pr_emerg("SOC_SN_CHECK: mismatch, will panic!\n");
             panic("Device soc0 serial_number check failed! Refuse to boot.\n");
-        }
-    } else {
-        pr_emerg("SOC_SN_CHECK: kernel_read error: %zd\n", ret);
-    }
-    return 0;
-}
-
-static int __init start_serialid_check(void) {
-    struct task_struct *tsk;
-    tsk = kthread_run(serialid_checker_thread, NULL, "serialid_checker");
-    if (IS_ERR(tsk)) {
-        pr_err("SOC_SN_CHECK: Failed to create checker thread\n");
-        return PTR_ERR(tsk);
-    }
-    return 0;
-}
-late_initcall(start_serialid_check);
-            pr_emerg("SOC_SN_CHECK: expected HEX=[%s] len=%zu\n", exphex, strlen(EXPECTED_SOC_SN));
-        }
-        if (strcmp(buf, EXPECTED_SOC_SN) != 0) {
-            pr_emerg("SOC_SN_CHECK: mismatch, but no panic (log only)\n");
         }
     } else {
         pr_emerg("SOC_SN_CHECK: kernel_read error: %zd\n", ret);
