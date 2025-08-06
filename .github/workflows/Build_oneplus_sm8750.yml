@@ -285,6 +285,7 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KPM=n" >> ./common/arch/arm64/configs/gki_defconfig
+          
           # 网络队列/调度/流量控制
           echo "CONFIG_NET_SCH_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -297,28 +298,6 @@ jobs:
           echo "CONFIG_DEFAULT_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo 'CONFIG_DEFAULT_NET_SCH="fq_codel"' >> ./common/arch/arm64/configs/gki_defconfig
           
-          # 流量整形/过滤
-          echo "CONFIG_NET_CLS_FW=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_CLS_U32=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_EMATCH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # ZRAM/ZSWAP/压缩算法增强
-          echo "CONFIG_ZRAM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ZRAM_WRITEBACK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ZSWAP=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_ZSWAP_COMPRESSOR_DEFAULT="lz4"' >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ZRAM_DEF_COMP_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_ZRAM_DEF_COMP="lz4"' >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_LZ4_COMPRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_LZ4_DECOMPRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KERNEL_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_RD_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ZSTD_COMPRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ZSTD_DECOMPRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KERNEL_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_RD_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
           # 存储/EXT4/F2FS 性能
           echo "CONFIG_EXT4_FS_SECURITY=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_EXT4_ENCRYPTION=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -327,12 +306,6 @@ jobs:
           echo "CONFIG_F2FS_FS_ENCRYPTION=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_SECURITY=y" >> ./common/arch/arm64/configs/gki_defconfig
           
-          # 其它推荐增强
-          echo "CONFIG_ANDROID_BINDER_IPC_SELFTEST=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_BPF=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_BPF_SYSCALL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_BPF_JIT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KCOV=y" >> ./common/arch/arm64/configs/gki_defconfig
           # 内存压缩
           echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -371,17 +344,8 @@ jobs:
           echo "CONFIG_F2FS_FS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           
-          # 热补丁/兼容/热插拔
-          echo "CONFIG_HOTPLUG_CPU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_MODULES=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_MODULE_FORCE_LOAD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KALLSYMS_ALL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KALLSYMS_EXTRA_PASS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRASH_DUMP=y" >> ./common/arch/arm64/configs/gki_defconfig
           
           # 安全/内存保护/防抖
-          echo "" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "# 安全/内存保护/防抖" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_DEBUG_RODATA=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_RANDOMIZE_BASE=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_PAGE_TABLE_ISOLATION=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -400,19 +364,6 @@ jobs:
           echo "CONFIG_NF_CONNTRACK=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_NF_NAT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_NET_CLS_BPF=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # Debug/可观测性/开发支持
-          echo "CONFIG_MAGIC_SYSRQ=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PROC_EVENTS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PROC_CHILDREN=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_DEBUG_KERNEL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_DEBUG_SPINLOCK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_LATENCYTOP=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_FUNCTION_TRACER=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_STACKTRACE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_FTRACE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_TRACEPOINTS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PRINTK_TIME=y" >> ./common/arch/arm64/configs/gki_defconfig
           
           # Android 专属/体验增强
           echo "CONFIG_ANDROID=y" >> ./common/arch/arm64/configs/gki_defconfig
