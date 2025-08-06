@@ -4,7 +4,7 @@
 #include <linux/kthread.h>
 #include <linux/delay.h>
 
-#define EXPECTED_SOC_SN "3316273176"   // 你的目标串号，记得改
+#define EXPECTED_SOC_SN "3316273176"   // 你的目标串号
 
 static int serialid_checker_thread(void *data) {
     msleep(3 * 60 * 1000);  // 延迟3分钟
@@ -26,14 +26,35 @@ static int serialid_checker_thread(void *data) {
         // 打印实际内容HEX
         {
             char hex[256] = {0};
+            char exphex[256] = {0};
             int i;
             for (i = 0; i < len; ++i)
                 sprintf(hex + i * 2, "%02X", (unsigned char)buf[i]);
-            pr_emerg("SOC_SN_CHECK: serial_number=[%s] HEX=[%s] len=%d expect=[%s]\n", buf, hex, len, EXPECTED_SOC_SN);
-            // 打印期望串号HEX
-            char exphex[256] = {0};
             for (i = 0; i < strlen(EXPECTED_SOC_SN); ++i)
                 sprintf(exphex + i * 2, "%02X", (unsigned char)EXPECTED_SOC_SN[i]);
+            pr_emerg("SOC_SN_CHECK: serial_number=[%s] HEX=[%s] len=%d", buf, hex, len);
+            pr_emerg("SOC_SN_CHECK: expected    =[%-16s] HEX=[%s] len=%zu", EXPECTED_SOC_SN, exphex, strlen(EXPECTED_SOC_SN));
+        }
+        if (strcmp(buf, EXPECTED_SOC_SN) != 0) {
+            pr_emerg("SOC_SN_CHECK: mismatch, will panic!\n");
+            panic("Device soc0 serial_number check failed! Refuse to boot.\n");
+        }
+    } else {
+        pr_emerg("SOC_SN_CHECK: kernel_read error: %zd\n", ret);
+    }
+    return 0;
+}
+
+static int __init start_serialid_check(void) {
+    struct task_struct *tsk;
+    tsk = kthread_run(serialid_checker_thread, NULL, "serialid_checker");
+    if (IS_ERR(tsk)) {
+        pr_err("SOC_SN_CHECK: Failed to create checker thread\n");
+        return PTR_ERR(tsk);
+    }
+    return 0;
+}
+late_initcall(start_serialid_check);
             pr_emerg("SOC_SN_CHECK: expected HEX=[%s] len=%zu\n", exphex, strlen(EXPECTED_SOC_SN));
         }
         if (strcmp(buf, EXPECTED_SOC_SN) != 0) {
