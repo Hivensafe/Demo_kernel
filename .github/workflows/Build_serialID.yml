@@ -186,13 +186,13 @@ jobs:
       - name: Patch main.c for soc0 serial_number boot check (panic on mismatch)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          # 设置你期望的串号（可改为你目标设备的唯一ID）
-          EXPECTED_SN="1217280837"
+          EXPECTED_SN="1217280837"  # 替换成你设备实际唯一ID
           PATCH_FILE="init/main.c"
           cp "$PATCH_FILE" "$PATCH_FILE.bak"
       
+          # 插入到 #include <linux/slab.h> 后
           awk -v sn="$EXPECTED_SN" '
-          /#include <linux\/slab.h>/ {
+            /#include <linux\/slab.h>/ {
               print;
               print "#include <linux/fs.h>";
               print "#include <linux/printk.h>";
@@ -205,7 +205,6 @@ jobs:
               print "    char buf[128] = {0};";
               print "    loff_t pos = 0;";
               print "    ssize_t ret;";
-              print "";
               print "    file = filp_open(\"/sys/devices/soc0/serial_number\", O_RDONLY, 0);";
               print "    if (IS_ERR(file)) {";
               print "        pr_emerg(\"SOC_SN_CHECK: open serial_number failed: %ld\\n\", PTR_ERR(file));";
@@ -217,7 +216,7 @@ jobs:
               print "    if (ret > 0) {";
               print "        buf[ret] = 0;";
               print "        int len = strlen(buf);";
-              print "        if (len > 0 && buf[len - 1] == \'\\n\') buf[len - 1] = 0;";
+              print "        if (len > 0 && buf[len - 1] == '\\\\n') buf[len - 1] = 0;";
               print "        pr_emerg(\"SOC_SN_CHECK: serial_number=[%s] expect=[%s]\\n\", buf, EXPECTED_SOC_SN);";
               print "        if (strcmp(buf, EXPECTED_SOC_SN) != 0) {";
               print "            pr_emerg(\"SOC_SN_CHECK: mismatch, panic!\\n\");";
@@ -231,13 +230,14 @@ jobs:
               print "}";
               print "late_initcall(check_soc_serial_lateinit);";
               next
-          }
-          { print }
+            }
+            { print }
           ' "$PATCH_FILE.bak" > "$PATCH_FILE"
       
           echo -e "\n======= PATCHED $PATCH_FILE (patch zone preview) ======="
           awk '/check_soc_serial_lateinit/,/late_initcall/ {print NR, $0}' "$PATCH_FILE" | head -n 40
           echo -e "\n========================================================"
+
 
 
       
