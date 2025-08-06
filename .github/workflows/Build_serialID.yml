@@ -183,10 +183,10 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID check after boot (kthread, 3min, sha256, panic on fail)
+      - name: Patch main.c for serialID check after boot (sha256, kthread, 3min, panic on fail, flags fix)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          TARGET_SHA256="8beebfd32c1f4e032f008b3e7ae5ee466cb6c1051b3b0ee7bfcfd295b263e2b0"  # 换成你本地算的sha256
+          TARGET_SHA256="8beebfd32c1f4e032f008b3e7ae5ee466cb6c1051b3b0ee7bfcfd295b263e2b0"  # 换成你自己的sha256
           cp init/main.c init/main.c.bak
       
           awk -v hash="$TARGET_SHA256" '
@@ -220,7 +220,6 @@ jobs:
               print "                shash = kmalloc(sizeof(*shash) + crypto_shash_descsize(tfm), GFP_KERNEL);";
               print "                if (shash) {";
               print "                    shash->tfm = tfm;";
-              print "                    shash->flags = 0;";
               print "                    if (!crypto_shash_digest(shash, concat, strlen(concat), sha256)) {";
               print "                        int i; for (i = 0; i < 32; ++i) sprintf(sha256_hex + i*2, \"%02x\", sha256[i]);";
               print "                        pr_emerg(\"serialID debug: [%s]->[%s], SHA256=[%s], TARGET=[%s]\\\\n\", buf, concat, sha256_hex, TARGET_SHA256);";
@@ -257,6 +256,7 @@ jobs:
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
           awk '/serialid_checker_thread/,/late_initcall/ {print NR, $0}' init/main.c | head -n 80
           echo -e "\n========================================================"
+
 
       
 
