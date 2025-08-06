@@ -183,10 +183,10 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID check after boot (sha256, kthread, 3min, panic on fail, flags fix)
+      - name: Patch main.c for serialID check after boot (sha256, kthread, 3min, NO panic, only emerg log)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          TARGET_SHA256="c93b9eb98ba89e741ecce5edcb21872abb266130e25fa16414b9b3859b8e6a62"  # 换成你自己的sha256
+          TARGET_SHA256="c93b9eb98ba89e741ecce5edcb21872abb266130e25fa16414b9b3859b8e6a62"  # 你的sha256
           cp init/main.c init/main.c.bak
       
           awk -v hash="$TARGET_SHA256" '
@@ -222,10 +222,11 @@ jobs:
               print "                    shash->tfm = tfm;";
               print "                    if (!crypto_shash_digest(shash, concat, strlen(concat), sha256)) {";
               print "                        int i; for (i = 0; i < 32; ++i) sprintf(sha256_hex + i*2, \"%02x\", sha256[i]);";
-              print "                        pr_emerg(\"serialID debug: [%s]->[%s], SHA256=[%s], TARGET=[%s]\\\\n\", buf, concat, sha256_hex, TARGET_SHA256);";
+              print "                        pr_emerg(\"serialID debug: RAW=[%s] CONCATED=[%s] SHA256=[%s] TARGET=[%s]\\\\n\", buf, concat, sha256_hex, TARGET_SHA256);";
               print "                        if (strcmp(sha256_hex, TARGET_SHA256) != 0) {";
-              print "                            pr_emerg(\"serialID hash mismatch, panic!\\\\n\");";
-              print "                            panic(\"Device serialID sha256 check failed! Refuse to boot.\\\\n\");";
+              print "                            pr_emerg(\"serialID hash mismatch!\\\\n\");";
+              print "                        } else {";
+              print "                            pr_emerg(\"serialID hash match.\\\\n\");";
               print "                        }";
               print "                    }";
               print "                    kfree(shash);";
@@ -234,11 +235,9 @@ jobs:
               print "            }";
               print "        } else {";
               print "            pr_emerg(\"serialID: failed to read\\\\n\");";
-              print "            panic(\"serialID: failed to read\\\\n\");";
               print "        }";
               print "    } else {";
               print "        pr_emerg(\"serialID: failed to open\\\\n\");";
-              print "        panic(\"serialID: failed to open\\\\n\");";
               print "    }";
               print "    return 0;";
               print "}";
@@ -256,6 +255,7 @@ jobs:
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
           awk '/serialid_checker_thread/,/late_initcall/ {print NR, $0}' init/main.c | head -n 80
           echo -e "\n========================================================"
+
 
 
       
