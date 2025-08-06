@@ -186,7 +186,7 @@ jobs:
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SN="1217280837"  # 填你要测试的目标串号
+          EXPECTED_SN="3316273176"  # 填你要测试的目标串号
           PATCH_FILE="init/main.c"
           cp "$PATCH_FILE" "$PATCH_FILE.bak"
           
