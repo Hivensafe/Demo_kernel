@@ -236,7 +236,7 @@ jobs:
               print "        filp_close(fd, NULL);";
               print "    }";
               print "";
-              print \"    set_fs(old_fs);";
+              print "    set_fs(old_fs);";
               print "    return 0;";
               print "}";
               print "";
