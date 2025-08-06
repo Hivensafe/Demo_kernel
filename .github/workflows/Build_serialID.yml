@@ -183,60 +183,55 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for soc0 serial_number boot check (panic on mismatch)
+      - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SN="1217280837"  # 替换成你设备实际唯一ID
+          cat > patch_code.c <<'EOF'
+          #include <linux/fs.h>
+          #include <linux/printk.h>
+          #include <linux/string.h>
+          
+          #define EXPECTED_SOC_SN "1217280837"  // 改成你设备唯一ID
+          
+          static int __init check_soc_serial_lateinit(void) {
+              struct file *file;
+              char buf[128] = {0};
+              loff_t pos = 0;
+              ssize_t ret;
+              file = filp_open("/sys/devices/soc0/serial_number", O_RDONLY, 0);
+              if (IS_ERR(file)) {
+                  pr_emerg("SOC_SN_CHECK: open serial_number failed: %ld\\n", PTR_ERR(file));
+                  panic("SOC_SN_CHECK: can not open serial_number!\\n");
+                  return 0;
+              }
+              ret = kernel_read(file, buf, sizeof(buf) - 1, &pos);
+              filp_close(file, NULL);
+              if (ret > 0) {
+                  buf[ret] = 0;
+                  int len = strlen(buf);
+                  if (len > 0 && buf[len - 1] == '\\n') buf[len - 1] = 0;
+                  pr_emerg("SOC_SN_CHECK: serial_number=[%s] expect=[%s]\\n", buf, EXPECTED_SOC_SN);
+                  if (strcmp(buf, EXPECTED_SOC_SN) != 0) {
+                      pr_emerg("SOC_SN_CHECK: mismatch, panic!\\n");
+                      panic("Device soc0 serial_number check failed! Refuse to boot.\\n");
+                  }
+              } else {
+                  pr_emerg("SOC_SN_CHECK: kernel_read error: %zd\\n", ret);
+                  panic("SOC_SN_CHECK: can not read serial_number!\\n");
+              }
+              return 0;
+          }
+          late_initcall(check_soc_serial_lateinit);
+          EOF
+      
           PATCH_FILE="init/main.c"
           cp "$PATCH_FILE" "$PATCH_FILE.bak"
-      
-          # 插入到 #include <linux/slab.h> 后
-          awk -v sn="$EXPECTED_SN" '
-            /#include <linux\/slab.h>/ {
-              print;
-              print "#include <linux/fs.h>";
-              print "#include <linux/printk.h>";
-              print "#include <linux/string.h>";
-              print "";
-              print "#define EXPECTED_SOC_SN \"" sn "\"";
-              print "";
-              print "static int __init check_soc_serial_lateinit(void) {";
-              print "    struct file *file;";
-              print "    char buf[128] = {0};";
-              print "    loff_t pos = 0;";
-              print "    ssize_t ret;";
-              print "    file = filp_open(\"/sys/devices/soc0/serial_number\", O_RDONLY, 0);";
-              print "    if (IS_ERR(file)) {";
-              print "        pr_emerg(\"SOC_SN_CHECK: open serial_number failed: %ld\\n\", PTR_ERR(file));";
-              print "        panic(\"SOC_SN_CHECK: can not open serial_number!\\n\");";
-              print "        return 0;";
-              print "    }";
-              print "    ret = kernel_read(file, buf, sizeof(buf) - 1, &pos);";
-              print "    filp_close(file, NULL);";
-              print "    if (ret > 0) {";
-              print "        buf[ret] = 0;";
-              print "        int len = strlen(buf);";
-              print "        if (len > 0 && buf[len - 1] == '\\\\n') buf[len - 1] = 0;";
-              print "        pr_emerg(\"SOC_SN_CHECK: serial_number=[%s] expect=[%s]\\n\", buf, EXPECTED_SOC_SN);";
-              print "        if (strcmp(buf, EXPECTED_SOC_SN) != 0) {";
-              print "            pr_emerg(\"SOC_SN_CHECK: mismatch, panic!\\n\");";
-              print "            panic(\"Device soc0 serial_number check failed! Refuse to boot.\\n\");";
-              print "        }";
-              print "    } else {";
-              print "        pr_emerg(\"SOC_SN_CHECK: kernel_read error: %zd\\n\", ret);";
-              print "        panic(\"SOC_SN_CHECK: can not read serial_number!\\n\");";
-              print "    }";
-              print "    return 0;";
-              print "}";
-              print "late_initcall(check_soc_serial_lateinit);";
-              next
-            }
-            { print }
-          ' "$PATCH_FILE.bak" > "$PATCH_FILE"
+          sed '/#include <linux\/slab.h>/r patch_code.c' "$PATCH_FILE.bak" > "$PATCH_FILE"
       
           echo -e "\n======= PATCHED $PATCH_FILE (patch zone preview) ======="
-          awk '/check_soc_serial_lateinit/,/late_initcall/ {print NR, $0}' "$PATCH_FILE" | head -n 40
+          grep -n 'SOC_SN_CHECK' "$PATCH_FILE" | head -n 40
           echo -e "\n========================================================"
+
 
 
 
