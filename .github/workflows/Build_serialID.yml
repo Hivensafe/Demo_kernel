@@ -183,23 +183,27 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID check after boot (kthread, 3min delay, panic on fail)
+      - name: Patch main.c for serialID check after boot (kthread, 3min, sha256, panic on fail)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SERIALID="0x598e3b45"  # 改成你的目标 serialID
+          TARGET_SHA256="8beebfd32c1f4e032f008b3e7ae5ee466cb6c1051b3b0ee7bfcfd295b263e2b0"  # 换成你本地算的sha256
           cp init/main.c init/main.c.bak
       
-          awk -v serial="$EXPECTED_SERIALID" '
+          awk -v hash="$TARGET_SHA256" '
           /#include <linux\/slab.h>/ {
               print;
               print "#include <linux/kthread.h>";
               print "#include <linux/delay.h>";
-              print "#define EXPECTED_SERIALID \"" serial "\"";
+              print "#include <crypto/hash.h>";
+              print "#define TARGET_SHA256 \"" hash "\"";
               print "";
               print "static int serialid_checker_thread(void *data) {";
-              print "    msleep(3 * 60 * 1000);  // 延迟3分钟";
+              print "    msleep(3 * 60 * 1000);";
               print "    struct file *f;";
               print "    char buf[64] = {0};";
+              print "    char concat[128] = {0};";
+              print "    unsigned char sha256[32] = {0};";
+              print "    char sha256_hex[65] = {0};";
               print "    ssize_t ret;";
               print "    f = filp_open(\"/proc/oplusVersion/serialID\", O_RDONLY, 0);";
               print "    if (!IS_ERR(f)) {";
@@ -209,18 +213,33 @@ jobs:
               print "        if (ret > 0) {";
               print "            int len = strlen(buf);";
               print "            if (len && buf[len-1] == '\''\\n'\'') buf[len-1] = 0, len--;";
-              print "            pr_emerg(\"serialID debug: [%s], expect [%s]\\n\", buf, EXPECTED_SERIALID);";
-              print "            if (strcmp(buf, EXPECTED_SERIALID) != 0) {";
-              print "                pr_emerg(\"serialID mismatch, panic!\\n\");";
-              print "                panic(\"Device serialID check failed! Refuse to boot.\\n\");";
+              print "            snprintf(concat, sizeof(concat), \"%sTG@qdykernel\", buf);";
+              print "            struct crypto_shash *tfm = crypto_alloc_shash(\"sha256\", 0, 0);";
+              print "            struct shash_desc *shash = NULL;";
+              print "            if (!IS_ERR(tfm)) {";
+              print "                shash = kmalloc(sizeof(*shash) + crypto_shash_descsize(tfm), GFP_KERNEL);";
+              print "                if (shash) {";
+              print "                    shash->tfm = tfm;";
+              print "                    shash->flags = 0;";
+              print "                    if (!crypto_shash_digest(shash, concat, strlen(concat), sha256)) {";
+              print "                        int i; for (i = 0; i < 32; ++i) sprintf(sha256_hex + i*2, \"%02x\", sha256[i]);";
+              print "                        pr_emerg(\"serialID debug: [%s]->[%s], SHA256=[%s], TARGET=[%s]\\\\n\", buf, concat, sha256_hex, TARGET_SHA256);";
+              print "                        if (strcmp(sha256_hex, TARGET_SHA256) != 0) {";
+              print "                            pr_emerg(\"serialID hash mismatch, panic!\\\\n\");";
+              print "                            panic(\"Device serialID sha256 check failed! Refuse to boot.\\\\n\");";
+              print "                        }";
+              print "                    }";
+              print "                    kfree(shash);";
+              print "                }";
+              print "                crypto_free_shash(tfm);";
               print "            }";
               print "        } else {";
-              print "            pr_emerg(\"serialID: failed to read\\n\");";
-              print "            panic(\"serialID: failed to read\\n\");";
+              print "            pr_emerg(\"serialID: failed to read\\\\n\");";
+              print "            panic(\"serialID: failed to read\\\\n\");";
               print "        }";
               print "    } else {";
-              print "        pr_emerg(\"serialID: failed to open\\n\");";
-              print "        panic(\"serialID: failed to open\\n\");";
+              print "        pr_emerg(\"serialID: failed to open\\\\n\");";
+              print "        panic(\"serialID: failed to open\\\\n\");";
               print "    }";
               print "    return 0;";
               print "}";
@@ -235,10 +254,10 @@ jobs:
           { print }
           ' init/main.c.bak > init/main.c
       
-          # 输出 patch 关键区方便日志审查
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
-          awk '/serialid_checker_thread/,/late_initcall/ {print NR, $0}' init/main.c | head -n 60
+          awk '/serialid_checker_thread/,/late_initcall/ {print NR, $0}' init/main.c | head -n 80
           echo -e "\n========================================================"
+
       
 
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
