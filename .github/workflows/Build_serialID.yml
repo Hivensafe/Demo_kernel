@@ -186,7 +186,7 @@ jobs:
       - name: Patch main.c for serialID check after boot (sha256, kthread, 3min, panic on fail, flags fix)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          TARGET_SHA256="8beebfd32c1f4e032f008b3e7ae5ee466cb6c1051b3b0ee7bfcfd295b263e2b0"  # 换成你自己的sha256
+          TARGET_SHA256="c93b9eb98ba89e741ecce5edcb21872abb266130e25fa16414b9b3859b8e6a62"  # 换成你自己的sha256
           cp init/main.c init/main.c.bak
       
           awk -v hash="$TARGET_SHA256" '
