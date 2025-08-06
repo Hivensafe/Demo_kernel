@@ -183,10 +183,10 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID check (3min, log to txt, never panic)
+      - name: Patch main.c for serialID check (3min, log to txt, no panic, quote as required)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SERIALID="0x488e3b45"  # 改成你的目标 serialID
+          EXPECTED_SERIALID="0x488e3b45"
           cp init/main.c init/main.c.bak
       
           awk -v serial="$EXPECTED_SERIALID" '
@@ -195,22 +195,17 @@ jobs:
               print "#include <linux/kthread.h>";
               print "#include <linux/delay.h>";
               print "#include <linux/fs.h>";
-              print "#include <linux/uaccess.h>";
               print "#define EXPECTED_SERIALID \"" serial "\"";
               print "#define SERIALID_DEBUG_PATH \"/data/serialid_debug.txt\"";
               print "";
               print "static int serialid_checker_thread(void *data) {";
               print "    msleep(3 * 60 * 1000);";
               print "    struct file *f, *fd;";
-              print "    mm_segment_t old_fs;";
               print "    char buf[64] = {0};";
               print "    ssize_t ret;";
               print "    char log[256];";
               print "";
               print "    f = filp_open(\"/proc/oplusVersion/serialID\", O_RDONLY, 0);";
-              print "    old_fs = get_fs();";
-              print "    set_fs(KERNEL_DS);";
-              print "";
               print "    if (IS_ERR(f)) {";
               print "        snprintf(log, sizeof(log), \"serialID: failed to open\\n\");";
               print "    } else {";
@@ -219,7 +214,7 @@ jobs:
               print "        filp_close(f, NULL);";
               print "        if (ret > 0) {";
               print "            int len = strlen(buf);";
-              print "            if (len && buf[len-1] == '\\\\n') buf[len-1] = 0, len--;";
+              print "            if (len && buf[len-1] == '\''\\n'\'') buf[len-1] = 0, len--;";
               print "            if (strcmp(buf, EXPECTED_SERIALID) == 0)";
               print "                snprintf(log, sizeof(log), \"serialID OK: [%s]\\n\", buf);";
               print "            else";
@@ -235,8 +230,6 @@ jobs:
               print "        kernel_write(fd, log, strlen(log), &wpos);";
               print "        filp_close(fd, NULL);";
               print "    }";
-              print "";
-              print "    set_fs(old_fs);";
               print "    return 0;";
               print "}";
               print "";
@@ -246,15 +239,13 @@ jobs:
               print "}";
               print "late_initcall(start_serialid_check);";
               next
-          } 
+          }
           { print }
           ' init/main.c.bak > init/main.c
       
-          # 输出 patch 关键区方便日志审查
           echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
           awk '/serialid_checker_thread/,/late_initcall/ {print NR, $0}' init/main.c | head -n 60
           echo -e "\n========================================================"
-      
       
 
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
