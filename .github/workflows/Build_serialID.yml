@@ -183,70 +183,40 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c for serialID check (3min, log to txt, no panic, quote as required)
+      - name: Patch main.c for boot time serialID check (late_initcall, auto panic)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          EXPECTED_SERIALID="0x488e3b45"
-          cp init/main.c init/main.c.bak
+          TARGET_SERIAL="0x488e3b45"
+          PATCH_FILE="init/main.c"
+          cp "$PATCH_FILE" "$PATCH_FILE.bak"
       
-          awk -v serial="$EXPECTED_SERIALID" '
+          awk -v serial="$TARGET_SERIAL" '
           /#include <linux\/slab.h>/ {
               print;
-              print "#include <linux/kthread.h>";
-              print "#include <linux/delay.h>";
-              print "#include <linux/fs.h>";
-              print "#define EXPECTED_SERIALID \"" serial "\"";
-              print "#define SERIALID_DEBUG_PATH \"/data/serialid_debug.txt\"";
+              print "#include <linux/init.h>";
+              print "#include <linux/printk.h>";
               print "";
-              print "static int serialid_checker_thread(void *data) {";
-              print "    msleep(3 * 60 * 1000);";
-              print "    struct file *f, *fd;";
-              print "    char buf[64] = {0};";
-              print "    ssize_t ret;";
-              print "    char log[256];";
-              print "";
-              print "    f = filp_open(\"/proc/oplusVersion/serialID\", O_RDONLY, 0);";
-              print "    if (IS_ERR(f)) {";
-              print "        snprintf(log, sizeof(log), \"serialID: failed to open\\n\");";
-              print "    } else {";
-              print "        loff_t pos = 0;";
-              print "        ret = kernel_read(f, buf, sizeof(buf)-1, &pos);";
-              print "        filp_close(f, NULL);";
-              print "        if (ret > 0) {";
-              print "            int len = strlen(buf);";
-              print "            if (len && buf[len-1] == '\''\\n'\'') buf[len-1] = 0, len--;";
-              print "            if (strcmp(buf, EXPECTED_SERIALID) == 0)";
-              print "                snprintf(log, sizeof(log), \"serialID OK: [%s]\\n\", buf);";
-              print "            else";
-              print "                snprintf(log, sizeof(log), \"serialID mismatch! got [%s], expect [%s]\\n\", buf, EXPECTED_SERIALID);";
-              print "        } else {";
-              print "            snprintf(log, sizeof(log), \"serialID: failed to read\\n\");";
-              print "        }";
+              print "static int __init check_serialid_early(void) {";
+              print "    unsigned int serial = get_serialID();";
+              print "    if (serial != " serial ") {";
+              print "        pr_emerg(\"serialID mismatch at boot! got [0x%x], expect [" serial "], panic!\\n\", serial);";
+              print "        panic(\"Device serialID check failed at boot!\\n\");";
               print "    }";
-              print "";
-              print "    fd = filp_open(SERIALID_DEBUG_PATH, O_WRONLY|O_CREAT|O_TRUNC, 0644);";
-              print "    if (!IS_ERR(fd)) {";
-              print "        loff_t wpos = 0;";
-              print "        kernel_write(fd, log, strlen(log), &wpos);";
-              print "        filp_close(fd, NULL);";
-              print "    }";
+              print "    pr_info(\"serialID ok: 0x%x\\n\", serial);";
               print "    return 0;";
               print "}";
-              print "";
-              print "static int __init start_serialid_check(void) {";
-              print "    kthread_run(serialid_checker_thread, NULL, \"serialid_checker\");";
-              print "    return 0;";
-              print "}";
-              print "late_initcall(start_serialid_check);";
+              print "late_initcall(check_serialid_early);";
               next
           }
           { print }
-          ' init/main.c.bak > init/main.c
+          ' "$PATCH_FILE.bak" > "$PATCH_FILE"
       
-          echo -e "\n======= PATCHED init/main.c (patch zone preview) ======="
-          awk '/serialid_checker_thread/,/late_initcall/ {print NR, $0}' init/main.c | head -n 60
+          echo -e "\n======= PATCHED $PATCH_FILE (patch zone preview) ======="
+          awk '/check_serialid_early/,/late_initcall/ {print NR, $0}' "$PATCH_FILE" | head -n 30
           echo -e "\n========================================================"
+
       
+            
 
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
