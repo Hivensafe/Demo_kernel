@@ -285,6 +285,55 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KPM=n" >> ./common/arch/arm64/configs/gki_defconfig
+          # 网络队列/调度/流量控制
+          echo "CONFIG_NET_SCH_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_SFQ=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_HTB=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_TBF=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_SFB=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_RED=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_INGRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_DEFAULT_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_DEFAULT_NET_SCH="fq_codel"' >> ./common/arch/arm64/configs/gki_defconfig
+          
+          # 流量整形/过滤
+          echo "CONFIG_NET_CLS_FW=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_CLS_U32=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_EMATCH=y" >> ./common/arch/arm64/configs/gki_defconfig
+          
+          # ZRAM/ZSWAP/压缩算法增强
+          echo "CONFIG_ZRAM=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZRAM_WRITEBACK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZSWAP=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_ZSWAP_COMPRESSOR_DEFAULT="lz4"' >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZRAM_DEF_COMP_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_ZRAM_DEF_COMP="lz4"' >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_LZ4_COMPRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_LZ4_DECOMPRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KERNEL_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_RD_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZSTD_COMPRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZSTD_DECOMPRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KERNEL_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_RD_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
+          
+          # 存储/EXT4/F2FS 性能
+          echo "CONFIG_EXT4_FS_SECURITY=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_EXT4_ENCRYPTION=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_F2FS_FS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_F2FS_FS_COMPRESSION=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_F2FS_FS_ENCRYPTION=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_F2FS_FS_SECURITY=y" >> ./common/arch/arm64/configs/gki_defconfig
+          
+          # 其它推荐增强
+          echo "CONFIG_ANDROID_BINDER_IPC_SELFTEST=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_BPF=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_BPF_SYSCALL=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_BPF_JIT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KCOV=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # 内存压缩
           echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -293,7 +342,7 @@ jobs:
           echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KERNEL_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig          
+          echo "CONFIG_KERNEL_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig 
           # Add SUSFS configuration settings
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -320,6 +369,10 @@ jobs:
             echo "CONFIG_TCP_CONG_WESTWOOD=n" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_TCP_CONG_HTCP=n" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> ./common/arch/arm64/configs/gki_defconfig
+          else
+            # Add FQ_CODEL configuration settings
+            echo "CONFIG_DEFAULT_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig   
+            echo "CONFIG_NET_SCH_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig  
           fi
           #Remove check_defconfig
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
