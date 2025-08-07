@@ -9,10 +9,9 @@
  *    - .data.expected_sn 段，不会被Clang/GCC合并/优化/丢弃
  *    - 支持后期 hex 编辑直接替换
  */
-__attribute__((section(".data.expected_sn")))
+__attribute__((aligned(16)))
 __attribute__((used))
-const char EXPECTED_SN[16] = "3316273176\0\0\0\0\0\0"; // 只用前10位，其余补0
-
+const char EXPECTED_SN[16] = "3316273176\0\0\0\0\0\0";
 /*
  * 2. 检查线程，延迟2分钟后校验
  */
