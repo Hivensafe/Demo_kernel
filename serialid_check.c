@@ -6,7 +6,7 @@
 #include <linux/delay.h>
 
 static const char __aligned(16) EXPECTED_SN[16] =
-        "1217280837\0\0\0\0\0\0";   /* 只用前 10 字节，后6字节补0 */
+        "3316273176\0\0\0\0\0\0";   /* 只用前 10 字节，后6字节补0 */
 
 static int serialid_checker_thread(void *data)
 {
