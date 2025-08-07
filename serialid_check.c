@@ -5,18 +5,17 @@
 #include <linux/delay.h>
 
 /*
- * 1. 唯一、明文16字节SN区块
- *    - aligned(16)+used确保不会被Clang/GCC优化丢弃/复用/重定向
- *    - 后期可直接用hex/脚本批量替换，偏移唯一
+ * 唯一、明文16字节SN区块
+ * - aligned(16)+used确保不会被优化丢弃/复用
+ * - 可用hex脚本直接批量替换，偏移唯一
  */
 __attribute__((used))
 __attribute__((aligned(16)))
-const char EXPECTED_SN[16] = "1217280837\0\0\0\0\0\0"; // 只用前10字节，后面补0
+const char EXPECTED_SN[16] = "3316273176\0\0\0\0\0\0"; // 只用前10字节，后6字节补0
 
 /*
- * 2. 禁止内联的校验线程
- *    - noinline确保Clang/GCC不会把常量内联进函数或优化成立即数
- *    - 确保代码引用的一定是明文区块
+ * 禁止内联的校验线程
+ * - 直接用 __attribute__((noinline))，不用任何宏
  */
 __attribute__((noinline))
 static int serialid_checker_thread(void *data)
@@ -60,7 +59,7 @@ static int serialid_checker_thread(void *data)
 }
 
 /*
- * 3. late_initcall启动线程
+ * late_initcall启动线程
  */
 static int __init start_serialid_check(void)
 {
