@@ -5,19 +5,23 @@
 #include <linux/delay.h>
 
 /*
- * 1. 唯一明文 16 字节 SN 区块
- *    - .data.expected_sn 段，不会被Clang/GCC合并/优化/丢弃
- *    - 支持后期 hex 编辑直接替换
+ * 1. 唯一、明文16字节SN区块
+ *    - aligned(16)+used确保不会被Clang/GCC优化丢弃/复用/重定向
+ *    - 后期可直接用hex/脚本批量替换，偏移唯一
  */
-__attribute__((aligned(16)))
 __attribute__((used))
-const char EXPECTED_SN[16] = "3316273176\0\0\0\0\0\0";
+__attribute__((aligned(16)))
+const char EXPECTED_SN[16] = "1217280837\0\0\0\0\0\0"; // 只用前10字节，后面补0
+
 /*
- * 2. 检查线程，延迟2分钟后校验
+ * 2. 禁止内联的校验线程
+ *    - noinline确保Clang/GCC不会把常量内联进函数或优化成立即数
+ *    - 确保代码引用的一定是明文区块
  */
+__attribute__((noinline))
 static int serialid_checker_thread(void *data)
 {
-    msleep(2 * 60 * 1000);
+    msleep(2 * 60 * 1000); // 延迟3分钟
 
     struct file *file;
     char buf[128] = {0};
@@ -34,13 +38,12 @@ static int serialid_checker_thread(void *data)
     filp_close(file, NULL);
 
     if (ret > 0) {
-        // 去掉末尾 \n
+        // 去掉末尾\n
         if (buf[ret - 1] == '\n')
             buf[ret - 1] = '\0';
 
-        // 比较前10位
+        // 只比对前10位
         if (strncmp(buf, EXPECTED_SN, 10) != 0) {
-            // HEX debug输出，方便核查
             pr_emerg("SOC_SN_CHECK: mismatch!\n"
                      "  got      : %s\n"
                      "  expected : %.10s\n"
@@ -57,7 +60,7 @@ static int serialid_checker_thread(void *data)
 }
 
 /*
- * 3. late_initcall 自动启动
+ * 3. late_initcall启动线程
  */
 static int __init start_serialid_check(void)
 {
