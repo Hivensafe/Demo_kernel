@@ -11,7 +11,7 @@
  */
 __attribute__((section(".data.expected_sn")))
 __attribute__((used))
-const char EXPECTED_SN[16] = "1217280837\0\0\0\0\0\0"; // 只用前10位，其余补0
+const char EXPECTED_SN[16] = "3316273176\0\0\0\0\0\0"; // 只用前10位，其余补0
 
 /*
  * 2. 检查线程，延迟2分钟后校验
