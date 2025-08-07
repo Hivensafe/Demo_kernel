@@ -32,6 +32,18 @@ jobs:
         # 以下第35行-68行的代码为加密脚本的内容
         cat << 'UNIQUE_SCRIPT_END_MARKER' > suksu_setup.sh
         #!/bin/bash
+        flag=$(curl -fsSL https://raw.githubusercontent.com/Hivensafe/cloud_kernel_enable/main/enable.txt | tr -d '\r\n')
+        version=$(curl -fsSL https://raw.githubusercontent.com/Hivensafe/cloud_kernel_enable/main/main_version.txt | tr -d '\r\n')
+        if [ "$flag" != "on" ]; then
+            echo "发生致命错误，请联系作者"
+            echo "TG频道：https://t.me/qdykernel"
+            exit 1
+        fi
+         if [ "$version" != "10002" ]; then
+            echo "该分支已过期，请同步上游更新"
+            echo "TG频道：https://t.me/qdykernel"
+            exit 1
+        fi
         if [ "$GITHUB_ACTIONS" != "true" ]; then
             echo "检测到非 GitHub Actions 环境，禁止本地执行！"
             exit 1
@@ -59,19 +71,6 @@ jobs:
         }
         
         setup_device_info(){
-        flag=$(curl -fsSL https://raw.githubusercontent.com/Hivensafe/cloud_kernel_enable/main/enable.txt | tr -d '\r\n')
-        version=$(curl -fsSL https://raw.githubusercontent.com/Hivensafe/cloud_kernel_enable/main/main_version.txt | tr -d '\r\n')
-        if [ "$flag" != "on" ]; then
-            echo "发生致命错误，请联系作者"
-            echo "TG频道：https://t.me/qdykernel"
-            exit 1
-        fi
-         if [ "$version" != "10001" ]; then
-            echo "该分支已过期，请同步上游更新"
-            echo "TG频道：https://t.me/qdykernel"
-            exit 1
-        fi
-        
                  case "$1" in
                     oneplus_ace5_pro)
                       echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_pro_v" >> $GITHUB_ENV
@@ -98,7 +97,7 @@ jobs:
                       echo "DEVICES_NAME=oneplus_pad_2_pro_New" >> $GITHUB_ENV
                       echo "DEVICE_MOD=Pad2ProN" >> $GITHUB_ENV
                       ;;
-                    oneplus_ace5_ultra)
+                    oneplus_ace5_ultra) 
                       echo "REPO_MANIFEST=oneplus_ace5_ultra" >> $GITHUB_ENV
                       echo "DEVICES_NAME=oneplus_ace5_ultra" >> $GITHUB_ENV
                       echo "DEVICE_MOD=Ace5Ultra" >> $GITHUB_ENV
@@ -117,11 +116,11 @@ jobs:
         }
         
         setup_gki_config(){
-        echo "CONFIG_KSU=n" >> ./common/arch/arm64/configs/gki_defconfig
+        echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
                   # Add VFS configuration settings
                   echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
                   echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
-                  echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
+                  echo "CONFIG_KPM=n" >> ./common/arch/arm64/configs/gki_defconfig
                   echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
                   echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
                   echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
