@@ -1,4 +1,4 @@
-name: Build_serialID
+name: Build_Proc
 on:
   workflow_dispatch:
     inputs:
