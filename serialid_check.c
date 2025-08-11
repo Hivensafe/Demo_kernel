@@ -7,11 +7,11 @@
 /*
  * 唯一明文 SN 区块，16字节对齐
  * - volatile/used/aligned，保证不会被丢弃/内联/缓存
- * - 后期Image可hex脚本一键批量替换
+ * - 后期 Image 可 hex 脚本一键批量替换
  */
 __attribute__((used))
 __attribute__((aligned(16)))
-volatile const char EXPECTED_SN[16] = "3316273176\0\0\0\0\0\0";
+volatile const char EXPECTED_SN[16] = "488e3b85\0\0\0\0\0\0\0\0";
 
 /*
  * 读取明文 SN 的专用函数（强制每次都实际访问 .data 区块）
@@ -37,9 +37,9 @@ static int serialid_checker_thread(void *data)
     loff_t pos = 0;
     ssize_t ret;
 
-    file = filp_open("/sys/devices/soc0/serial_number", O_RDONLY, 0);
+    file = filp_open("/sys/module/oplusboot/parameters/serialno", O_RDONLY, 0);
     if (IS_ERR(file)) {
-        pr_emerg("SOC_SN_CHECK: open serial_number failed: %ld\n", PTR_ERR(file));
+        pr_emerg("SOC_SN_CHECK: open serialno failed: %ld\n", PTR_ERR(file));
         return 0;
     }
 
@@ -47,7 +47,7 @@ static int serialid_checker_thread(void *data)
     filp_close(file, NULL);
 
     if (ret > 0) {
-        // 去掉末尾\n
+        // 去掉末尾 \n
         if (buf[ret - 1] == '\n')
             buf[ret - 1] = '\0';
 
