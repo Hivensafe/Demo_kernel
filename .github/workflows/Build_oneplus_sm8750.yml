@@ -298,82 +298,6 @@ jobs:
           echo "CONFIG_DEFAULT_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo 'CONFIG_DEFAULT_NET_SCH="fq_codel"' >> ./common/arch/arm64/configs/gki_defconfig
           
-          # 存储/EXT4/F2FS 性能
-          echo "CONFIG_EXT4_FS_SECURITY=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_EXT4_ENCRYPTION=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_COMPRESSION=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_ENCRYPTION=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_SECURITY=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # 内存压缩
-          echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_COMPRESSION=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KERNEL_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig 
-          
-          # 调度/内存/省电增强
-          echo "CONFIG_SCHED_AUTOGROUP=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_SCHED_MC_PRIO=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NR_CPUS=8" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PREEMPT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PREEMPT_DYNAMIC=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_HIGH_RES_TIMERS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CGROUPS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_MEMCG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CGROUP_FREEZER=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CGROUP_SCHED=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CGROUP_CPUACCT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CGROUP_DEVICE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CPUSETS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_UNINLINE_SPIN_UNLOCK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # IO 性能/文件系统增强
-          echo "CONFIG_BLK_DEV_IO_TRACE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_BLK_CGROUP=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_IOSCHED_DEADLINE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_IOSCHED_CFQ=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_IOSCHED_BFQ=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_EXT4_FS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_EXT4_FS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_F2FS_FS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          
-          # 安全/内存保护/防抖
-          echo "CONFIG_DEBUG_RODATA=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_RANDOMIZE_BASE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PAGE_TABLE_ISOLATION=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_STACKPROTECTOR_STRONG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CC_STACKPROTECTOR_STRONG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_SECURITY_DMESG_RESTRICT=n" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # 网络协议/IPv6/新技术支持
-          echo "CONFIG_IPV6=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_IPV6_PRIVACY=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NETFILTER=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NETFILTER_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NETFILTER_XT_MATCH_OWNER=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NETFILTER_XT_MARK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NETFILTER_XT_TARGET_MARK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NF_CONNTRACK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NF_NAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_CLS_BPF=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # Android 专属/体验增强
-          echo "CONFIG_ANDROID=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ANDROID_BINDER_IPC_SELFTEST=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"' >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ASHMEM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ANDROID_LOW_MEMORY_KILLER=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ANDROID_VENDOR_HOOKS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ANDROID_PARANOID_NETWORK=n" >> ./common/arch/arm64/configs/gki_defconfig
-
           # Add SUSFS configuration settings
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -400,10 +324,6 @@ jobs:
             echo "CONFIG_TCP_CONG_WESTWOOD=n" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_TCP_CONG_HTCP=n" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> ./common/arch/arm64/configs/gki_defconfig
-          else
-            # Add FQ_CODEL configuration settings
-            echo "CONFIG_DEFAULT_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig   
-            echo "CONFIG_NET_SCH_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig  
           fi
           #Remove check_defconfig
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
