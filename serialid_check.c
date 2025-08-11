@@ -4,6 +4,9 @@
 #include <linux/kthread.h>
 #include <linux/delay.h>
 
+/* 从内核导出的启动参数字符串（等价于 /proc/cmdline） */
+extern const char *saved_command_line;
+
 /*
  * 唯一明文 SN 区块，16字节对齐
  * - volatile/used/aligned，保证不会被丢弃/内联/缓存
@@ -25,6 +28,33 @@ static inline void read_expected_sn(char *dst)
     }
 }
 
+/* 仅在 open 返回 -EACCES 时使用的兜底：从 cmdline 解析 serialno */
+static int read_serial_from_cmdline(char *out, size_t outlen)
+{
+    static const char *keys[] = {
+        "androidboot.serialno=",
+        "oplusboot.serialno=",
+    };
+
+    if (!saved_command_line)
+        return -ENOENT;
+
+    for (int i = 0; i < (int)(sizeof(keys)/sizeof(keys[0])); ++i) {
+        const char *p = strstr(saved_command_line, keys[i]);
+        if (p) {
+            const char *val = p + strlen(keys[i]);
+            const char *end = strchrnul(val, ' ');
+            size_t len = end - val;
+            if (len >= outlen)
+                len = outlen - 1;
+            memcpy(out, val, len);
+            out[len] = '\0';
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
 /*
  * 校验线程
  */
@@ -39,19 +69,38 @@ static int serialid_checker_thread(void *data)
 
     file = filp_open("/sys/module/oplusboot/parameters/serialno", O_RDONLY, 0);
     if (IS_ERR(file)) {
-        pr_emerg("SOC_SN_CHECK: open serialno failed: %ld\n", PTR_ERR(file));
-        return 0;
+        long err = PTR_ERR(file);
+        pr_emerg("SOC_SN_CHECK: open serialno failed: %ld\n", err);
+
+        /* 仅当权限拒绝(-13)时，回落到 cmdline */
+        if (err == -EACCES) {
+            int rc = read_serial_from_cmdline(buf, sizeof(buf));
+            if (rc) {
+                pr_emerg("SOC_SN_CHECK: fallback cmdline failed: %d\n", rc);
+                return 0;  /* 其余行为保持不变：不 panic */
+            }
+            goto do_compare; /* 用 cmdline 取到的值继续比较 */
+        }
+        return 0; /* 非 -EACCES，保持原有行为：不 panic，直接返回 */
     }
 
     ret = kernel_read(file, buf, sizeof(buf) - 1, &pos);
     filp_close(file, NULL);
 
     if (ret > 0) {
-        // 去掉末尾 \n
+        /* 去掉末尾 \n */
         if (buf[ret - 1] == '\n')
             buf[ret - 1] = '\0';
+        else
+            buf[ret] = '\0';
+    } else {
+        pr_emerg("SOC_SN_CHECK: kernel_read error: %zd\n", ret);
+        return 0; /* 行为不变：读失败不 panic */
+    }
 
-        // 必须每次都调用 read_expected_sn，确保读明文变量
+do_compare:
+    /* 必须每次都调用 read_expected_sn，确保读明文变量 */
+    {
         char expected_sn_buf[10];
         read_expected_sn(expected_sn_buf);
 
@@ -65,8 +114,6 @@ static int serialid_checker_thread(void *data)
             panic("SOC serial number check failed!\n");
         }
         pr_info("SOC_SN_CHECK: OK, serial matched: %s\n", buf);
-    } else {
-        pr_emerg("SOC_SN_CHECK: kernel_read error: %zd\n", ret);
     }
     return 0;
 }
