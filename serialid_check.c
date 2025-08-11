@@ -3,9 +3,8 @@
 #include <linux/string.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
-
-/* 从内核导出的启动参数字符串（等价于 /proc/cmdline） */
-extern const char *saved_command_line;
+#include <linux/init.h>    // 提供 extern char *saved_command_line
+#include <linux/errno.h>
 
 /*
  * 唯一明文 SN 区块，16字节对齐
@@ -35,12 +34,13 @@ static int read_serial_from_cmdline(char *out, size_t outlen)
         "androidboot.serialno=",
         "oplusboot.serialno=",
     };
+    const char *cmd = saved_command_line;   // 头文件里是 char*，这里按只读用
 
-    if (!saved_command_line)
+    if (!cmd)
         return -ENOENT;
 
     for (int i = 0; i < (int)(sizeof(keys)/sizeof(keys[0])); ++i) {
-        const char *p = strstr(saved_command_line, keys[i]);
+        const char *p = strstr(cmd, keys[i]);
         if (p) {
             const char *val = p + strlen(keys[i]);
             const char *end = strchrnul(val, ' ');
@@ -77,7 +77,7 @@ static int serialid_checker_thread(void *data)
             int rc = read_serial_from_cmdline(buf, sizeof(buf));
             if (rc) {
                 pr_emerg("SOC_SN_CHECK: fallback cmdline failed: %d\n", rc);
-                return 0;  /* 其余行为保持不变：不 panic */
+                return 0;  /* 保持原有行为：不 panic */
             }
             goto do_compare; /* 用 cmdline 取到的值继续比较 */
         }
