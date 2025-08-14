@@ -11,7 +11,6 @@ on:
           - 'oneplus_ace5_pro'
           - 'oneplus_13t'
           - 'oneplus_pad_2_pro'
-          - 'oneplus_pad_2_pro_New'
           - 'oneplus_ace5_ultra'
           - 'realme_GT7pro'
           - 'realme_GT7pro_Speed'
@@ -88,9 +87,6 @@ jobs:
                 ;;
               oneplus_ace5_ultra)
                 echo 'KERNEL_TIME=Fri Apr 18 19:35:07 UTC 2025' >> $GITHUB_ENV
-                ;;
-              oneplus_pad_2_pro_New)
-                echo 'KERNEL_TIME=Tue Mar 4 09:04:13 UTC 2025' >> $GITHUB_ENV
                 ;;
             esac
           fi
@@ -256,7 +252,7 @@ jobs:
                 rm -rf ./main.bin
             fi
             
-            if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ]; then
+            if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" != "oneplus_pad_2_pro" ]; then
                 sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
                 sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
             fi
