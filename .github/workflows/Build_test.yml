@@ -262,9 +262,8 @@ jobs:
             
             patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
 
-            cd kernel_workspace/kernel_platform
-            # 1) 写入补丁文件（仅修改 /common/drivers/input/input.c）
-            cat > ksutrace-input.patch <<'PATCH'
+            # 1) 在仓库根目录创建补丁
+            cat > ksutrace-all-c.patch <<'PATCH'
             diff --git a/common/drivers/input/input.c b/common/drivers/input/input.c
             --- a/common/drivers/input/input.c
             +++ b/common/drivers/input/input.c
@@ -288,15 +287,6 @@ jobs:
             +#endif
             +
              	if (is_event_supported(type, dev->evbit, EV_MAX)) {
-             PATCH
-            
-            # 2) 应用（用 git 管理的话优先这样）
-            git apply --index ksutrace-input.patch || git apply ksutrace-input.patch
-            
-            # 3) 检查
-            git --no-pager diff -- common/drivers/input/input.c
-            # 在仓库根目录执行：写入并应用补丁
-            cat > ksutrace-rest.patch <<'PATCH'
             diff --git a/common/drivers/tty/pty.c b/common/drivers/tty/pty.c
             --- a/common/drivers/tty/pty.c
             +++ b/common/drivers/tty/pty.c
@@ -439,12 +429,13 @@ jobs:
              		return error;
             PATCH
             
-            # 应用补丁（优先用 --index）
-            git apply --index ksutrace-rest.patch || git apply ksutrace-rest.patch
+            # 2) 试用并应用补丁（推荐先 --check）
+            git apply --check ksutrace-all-c.patch && git apply --index ksutrace-all-c.patch || git apply ksutrace-all-c.patch
             
-            # 快速核对每个文件的新增标记或调用是否到位
-            rg -n 'ksu_trace|TRACEPOINT_HOOK' common/{drivers/tty/pty.c,fs/exec.c,fs/open.c,fs/read_write.c,fs/stat.c} \
-             || grep -n 'ksu_trace\|TRACEPOINT_HOOK' -R common/{drivers/tty/pty.c,fs/exec.c,fs/open.c,fs/read_write.c,fs/stat.c}
+            # 3) 快速核对新增的 include / 调用是否都到位
+            rg -n 'ksu_trace|TRACEPOINT_HOOK' common/{drivers/input/input.c,drivers/tty/pty.c,fs/exec.c,fs/open.c,fs/read_write.c,fs/stat.c} \
+             || grep -n 'ksu_trace\|TRACEPOINT_HOOK' -R common/{drivers/input/input.c,drivers/tty/pty.c,fs/exec.c,fs/open.c,fs/read_write.c,fs/stat.c}
+
 
             
             cp "${GITHUB_WORKSPACE}/.github/workflows/tracepoint_hooks.patch ./
