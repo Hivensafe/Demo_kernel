@@ -439,7 +439,7 @@ jobs:
 
             
             cp "${GITHUB_WORKSPACE}/.github/workflows/6.6-tracepoint_hooks.patch ./
-            patch -p1 -F 3 < tracepoint_hooks.patch
+            patch -p1 -F 3 < 6.6-tracepoint_hooks.patch
             
             echo "完成"
 
