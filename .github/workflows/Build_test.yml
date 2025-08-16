@@ -219,6 +219,7 @@ jobs:
             fi
             ./setup.bin
       - name: 🔧 Set up SUSFS (配置 SUSFS)
+        shell: bash
         run: |
           set -Eeuo pipefail
       
@@ -263,10 +264,9 @@ jobs:
           fi
       
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-      
           popd >/dev/null  # 回到 kernel_platform 根
       
-          # 生成并应用 KSU trace C 改动补丁（注意 heredoc 顶格；YAML 已统一缩进，不会残留空格）
+          # 生成并应用 KSU trace 的 C 改动补丁（只改 C，不含 Kconfig/tracepoint 定义）
           cat > ksutrace-all-c.patch <<'KSU_PATCH'
           diff --git a/common/drivers/input/input.c b/common/drivers/input/input.c
           --- a/common/drivers/input/input.c
@@ -433,18 +433,31 @@ jobs:
            		return error;
           KSU_PATCH
           
-              # 防止 CRLF 破坏补丁
+              # 去 CRLF + 自动移除 YAML 引入的统一缩进（防止 "corrupt patch"）
               sed -i 's/\r$//' ksutrace-all-c.patch
+              lead="$(awk 'NR==1{match($0,/^[ ]*/); print RLENGTH; exit}' ksutrace-all-c.patch)"
+              if [ "${lead:-0}" -gt 0 ]; then
+                sed -i "s/^ \{${lead}\}//" ksutrace-all-c.patch
+              fi
+          
+              # 自检补丁头是否顶格
+              head -n3 ksutrace-all-c.patch | sed -n l
           
               # 在仓库根（kernel_platform）应用；路径以 common/ 开头能命中
               git apply --check ksutrace-all-c.patch
               git apply --index ksutrace-all-c.patch || git apply ksutrace-all-c.patch
           
-              # 追加 tracepoint hooks 的额外补丁（如果你需要它）
-              cp "${GITHUB_WORKSPACE}/.github/workflows/6.6-tracepoint_hooks.patch" ./
-              patch -p1 -F 3 < 6.6-tracepoint_hooks.patch
+              # （可选）追加 tracepoint hooks 的额外补丁：若文件存在才应用
+              if [ -f "${GITHUB_WORKSPACE}/.github/workflows/6.6-tracepoint_hooks.patch" ]; then
+                cp "${GITHUB_WORKSPACE}/.github/workflows/6.6-tracepoint_hooks.patch" ./
+                patch -p1 -F 3 < 6.6-tracepoint_hooks.patch
+              fi
+          
+              # 快速核对新增行
+              grep -Rn 'ksu_trace\|TRACEPOINT_HOOK' -- common/{drivers/input/input.c,drivers/tty/pty.c,fs/exec.c,fs/open.c,fs/read_write.c,fs/stat.c} || true
           
               echo "完成"
+
 
 
       - name: 🔧 Cache HMBird patch (缓存HMBird补丁)
