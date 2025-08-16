@@ -83,7 +83,7 @@ jobs:
                 echo 'KERNEL_TIME=FriApr 25 01:56:53 UTC 2025' >> $GITHUB_ENV
                 ;;
               oneplus_pad_2_pro)
-                echo 'KERNEL_TIME=Wed Dec 11 19:16:38 UTC 2024' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Tue Mar 4 09:04:13 UTC 2025' >> $GITHUB_ENV
                 ;;
               oneplus_ace5_ultra)
                 echo 'KERNEL_TIME=Fri Apr 18 19:35:07 UTC 2025' >> $GITHUB_ENV
@@ -299,7 +299,7 @@ jobs:
           # Add VFS configuration settings
           echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_KPROBES_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KPM=n" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -371,13 +371,10 @@ jobs:
               DEFAULT_SUFFIX="-android15-8-gba3bcfd39307-abogki413159095-4k"
               ;;
             oneplus_pad_2_pro)
-              DEFAULT_SUFFIX="-android15-8-g0261dbe3cf7e-ab12786384-4k"
+              DEFAULT_SUFFIX="-android15-8-g302cb15749a8-ab13157299-4k"
               ;;
             oneplus_ace5_ultra)
               DEFAULT_SUFFIX="-android15-8-gfc70d29746a7-abogki412262948-4k"
-              ;;
-            oneplus_pad_2_pro_New)
-              DEFAULT_SUFFIX="-android15-8-g302cb15749a8-ab13157299-4k"
               ;;
           esac
           
@@ -398,9 +395,6 @@ jobs:
           fi
           ESCAPED_SUFFIX=$(printf '%s\n' "$DEFAULT_SUFFIX" | sed 's:[\/&]:\\&:g')
           cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
-          chmod +x main.bin
-          ./main.bin "setup_suffix" "${DEVICE_MOD}"
-          rm -rf ./main.bin
           sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
           
