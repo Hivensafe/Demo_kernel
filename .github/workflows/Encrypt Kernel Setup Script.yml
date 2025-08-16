@@ -39,7 +39,7 @@ jobs:
             echo "TG频道：https://t.me/qdykernel"
             exit 1
         fi
-         if [ "$version" != "10002" ]; then
+         if [ "$version" != "10003" ]; then
             echo "该分支已过期，请同步上游更新"
             echo "TG频道：https://t.me/qdykernel"
             exit 1
@@ -92,11 +92,6 @@ jobs:
                       echo "DEVICES_NAME=oneplus_pad_2_pro" >> $GITHUB_ENV
                       echo "DEVICE_MOD=Pad2Pro" >> $GITHUB_ENV
                       ;;  
-                    oneplus_pad_2_pro_New)
-                      echo "REPO_MANIFEST=oneplus_13t" >> $GITHUB_ENV
-                      echo "DEVICES_NAME=oneplus_pad_2_pro_New" >> $GITHUB_ENV
-                      echo "DEVICE_MOD=Pad2ProN" >> $GITHUB_ENV
-                      ;;
                     oneplus_ace5_ultra) 
                       echo "REPO_MANIFEST=oneplus_ace5_ultra" >> $GITHUB_ENV
                       echo "DEVICES_NAME=oneplus_ace5_ultra" >> $GITHUB_ENV
@@ -159,11 +154,7 @@ jobs:
                   fi
         }
         
-        setup_suffix(){
-        if [ "$1" = "oneplus_pad_2_pro_New" ]; then
-                      sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\157/' ./common/Makefile
-                  fi
-        }
+
         
         make_anykernel3(){
         git clone https://github.com/showdo/AnyKernel3.git --depth=1      
@@ -182,9 +173,6 @@ jobs:
             ;;
           setup_gki_config)
             setup_gki_config "$2"
-            ;;
-          setup_suffix)
-            setup_suffix "$2"
             ;;
           make_anykernel3)
             make_anykernel3
