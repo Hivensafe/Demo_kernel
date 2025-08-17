@@ -238,42 +238,253 @@ jobs:
           cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto
           cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
       
-          # 进入 common 应用 SUSFS patch
+          # 在 common/ 内做 LZ4 清理与 SUSFS patch
           pushd common >/dev/null
           if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ]; then
             files=(lib/lz4/lz4_compress.c lib/lz4/lz4_decompress.c lib/lz4/lz4defs.h lib/lz4/lz4hc_compress.c)
-            for f in "${files[@]}"; do [ -e "$f" ] && rm "$f"; done
+            for file in "${files[@]}"; do [ -e "$file" ] && rm "$file"; done
             cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
             chmod +x main.bin
             ./main.bin "setup_lz4"
             rm -f ./main.bin
           fi
+      
           if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" != "oneplus_pad_2_pro" ]; then
             sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
             sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
           fi
+      
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-          popd >/dev/null
-          cp "${GITHUB_WORKSPACE}/ksutrace-all-c.patch" ./ksutrace-all-c.patch
-          
+          popd >/dev/null  # 回到 kernel_platform 根
+      
+          # === 生成并应用 KernelSU 的 C 改动补丁（支持缩进的 heredoc，不会报 wanted 'PATCH'）===
+          cat <<-'PATCH' > ksutrace-all-c.patch
+          diff --git a/common/drivers/input/input.c b/common/drivers/input/input.c
+          --- a/common/drivers/input/input.c
+          +++ b/common/drivers/input/input.c
+          @@ -29,6 +29,18 @@
+           #include "input-core-private.h"
+           #include "input-poller.h"
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#include <../../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#endif
+           MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
+           MODULE_DESCRIPTION("Input core");
+           MODULE_LICENSE("GPL");
+          @@ -429,6 +441,10 @@ void input_event(struct input_dev *dev, unsigned int type, unsigned int code, int value)
+           {
+           	unsigned long flags;
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_input_hook(&type, &code, &value);
+          +#endif
+          +
+           	if (is_event_supported(type, dev->evbit, EV_MAX)) {
+          diff --git a/common/drivers/tty/pty.c b/common/drivers/tty/pty.c
+          --- a/common/drivers/tty/pty.c
+          +++ b/common/drivers/tty/pty.c
+          @@ -31,6 +31,18 @@
+           #include <linux/compat.h>
+           #include "tty.h"
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#include <../../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#endif
+           #undef TTY_DEBUG_HANGUP
+           #ifdef TTY_DEBUG_HANGUP
+           # define tty_debug_hangup(tty, f, args...) tty_debug(tty, f, ##args)
+          @@ -707,6 +719,10 @@ static struct tty_struct *pts_unix98_lookup(struct tty_driver *driver,
+           {
+           	struct tty_struct *tty;
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_devpts_hook((struct inode *)file->f_path.dentry->d_inode);
+          +#endif
+          +
+           	mutex_lock(&devpts_mutex);
+           	tty = devpts_get_priv(file->f_path.dentry);
+           	mutex_unlock(&devpts_mutex);
+          diff --git a/common/fs/exec.c b/common/fs/exec.c
+          --- a/common/fs/exec.c
+          +++ b/common/fs/exec.c
+          @@ -81,6 +81,18 @@
+           #include <trace/events/sched.h>
+           #include <trace/hooks/sched.h>
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#endif
+           #ifdef CONFIG_SECURITY_DEFEX
+           #include <linux/defex.h>
+           #endif
+          @@ -2085,6 +2097,9 @@ static int do_execve(struct filename *filename,
+           {
+           	struct user_arg_ptr argv = { .ptr.native = __argv };
+           	struct user_arg_ptr envp = { .ptr.native = __envp };
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_execveat_hook((int *)AT_FDCWD, &filename, &argv, &envp, 0);
+          +#endif
+           	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+           }
+           
+          @@ -2112,6 +2127,9 @@ static int compat_do_execve(struct filename *filename,
+           	.is_compat = true,
+           	.ptr.compat = __envp,
+           };
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_execveat_sucompat_hook((int *)AT_FDCWD, &filename, NULL, NULL, NULL);
+          +#endif
+           	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+           }
+          diff --git a/common/fs/open.c b/common/fs/open.c
+          --- a/common/fs/open.c
+          +++ b/common/fs/open.c
+          @@ -37,6 +37,18 @@
+           #include "internal.h"
+           #include <linux/ima.h>
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#endif
+           int do_truncate(struct user_namespace *mnt_userns, struct dentry *dentry,
+           		loff_t length, unsigned int time_attrs, struct file *filp)
+           {
+          @@ -468,6 +480,9 @@ static long do_faccessat(int dfd, const char __user *filename, int mode, int fla
+           
+           SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+           {
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	/* hook 会在后续脚本里移动到 do_faccessat() 开头，这里先保留占位防冲突 */
+          +#endif
+           	return do_faccessat(dfd, filename, mode, 0);
+           }
+          diff --git a/common/fs/read_write.c b/common/fs/read_write.c
+          --- a/common/fs/read_write.c
+          +++ b/common/fs/read_write.c
+          @@ -25,6 +25,18 @@
+           #include <linux/capability.h>
+           #include <linux/idr.h>
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#endif
+           const struct file_operations generic_ro_fops = {
+           	.llseek		= generic_file_llseek,
+           	.read_iter	= generic_file_read_iter,
+          @@ -630,6 +642,9 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
+           
+           SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+           {
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_sys_read_hook(fd, &buf, &count);
+          +#endif
+           	return ksys_read(fd, buf, count);
+           }
+          diff --git a/common/fs/stat.c b/common/fs/stat.c
+          --- a/common/fs/stat.c
+          +++ b/common/fs/stat.c
+          @@ -24,6 +24,18 @@
+           #include "internal.h"
+           #include "mount.h"
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#endif
+           /**
+            * generic_fillattr - Fill in the basic attributes from the inode struct
+            * @mnt_userns: user namespace of the mount the inode was found from
+          @@ -408,6 +420,10 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+           	struct kstat stat;
+           	int error;
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
+          +#endif
+          +
+           	error = vfs_fstatat(dfd, filename, &stat, flag);
+           	if (error)
+           		return error;
+          @@ -559,6 +575,10 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+           	struct kstat stat;
+           	int error;
+           
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
+          +#endif
+          +
+           	error = vfs_fstatat(dfd, filename, &stat, flag);
+           	if (error)
+           		return error;
+          PATCH
+      
           # 规整行尾并确保补丁完整
           sed -i 's/\r$//' ksutrace-all-c.patch
           tail -c1 ksutrace-all-c.patch | od -An -t u1 | grep -q 10 || echo >> ksutrace-all-c.patch
       
-          echo "== patch header =="
-          head -n3 ksutrace-all-c.patch
-          echo "== patch tail =="
-          tail -n3 ksutrace-all-c.patch
-      
-          # 在仓库根（kernel_platform）应用；补丁路径以 common/ 开头
+          # 在仓库根应用（补丁路径以 common/ 开头）
           git apply --check ksutrace-all-c.patch
           git apply --index ksutrace-all-c.patch || git apply ksutrace-all-c.patch
       
-          # --- 修正 faccessat 的 hook 位置：从 SYSCALL_DEFINE 挪到 do_faccessat 开头（避免未声明形参）---
+          # ---- 把 faccessat 的 hook 移到 do_faccessat() 开头（自动捕获形参名）----
           f_open=common/fs/open.c
-          # 删掉 faccessat() 中的 hook（若存在）
-          perl -0777 -i -pe 's/\n?#if defined\(CONFIG_KSU\).*?\n\s*trace_ksu_trace_faccessat_hook\(.*?\);\n\s*#endif\n//s' "$f_open"
-          # 在 do_faccessat() 开头插入，自动捕获真实形参名
+          # 清理 faccessat() 中任何遗留的 trace 调用
+          perl -0777 -i -pe 's/\n?#if defined\(CONFIG_KSU\).*?\n\s*trace_ksu_trace_faccessat_hook\(.*?\);\n\s*#endif\n//s' "$f_open" || true
+          # 插入到 do_faccessat() 函数体起始
           perl -0777 -i -pe '
             s{
               (static\s+long\s+do_faccessat\s*\(\s*
@@ -285,8 +496,8 @@ jobs:
             }{$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_faccessat_hook(&\2, &\3, &\4, NULL);\n#endif\n}sx
           ' "$f_open" || true
       
-          # 快速核对新增的 include / 调用
-          grep -n 'ksu_trace\|TRACEPOINT_HOOK' -R -- \
+          # 快速核对（仅显示命中的标记）
+          grep -n 'ksu_trace\|TRACE_INCLUDE_PATH\|TRACEPOINT_HOOK' -R -- \
             common/drivers/input/input.c \
             common/drivers/tty/pty.c \
             common/fs/exec.c \
