@@ -264,23 +264,21 @@ jobs:
           fi
       
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-          
+          popd >/dev/null  # 回到 kernel_platform 根
+      
           # === Add KernelSU trace hooks (C files only, idempotent) ===
-          set -Eeuo pipefail
-          
-          root="$PWD"     # 当前位置应在 kernel_workspace/kernel_platform
-          echo "$root"
-          # 目标文件
-          f_input=./drivers/input/input.c
-          f_pty=./drivers/tty/pty.c
-          f_exec=./fs/exec.c
-          f_open=./fs/open.c
-          f_rw=./fs/read_write.c
-          f_stat=./fs/stat.c
-          
+          # 目标文件（注意：都在 common/ 下）
+          f_input=common/drivers/input/input.c
+          f_pty=common/drivers/tty/pty.c
+          f_exec=common/fs/exec.c
+          f_open=common/fs/open.c
+          f_rw=common/fs/read_write.c
+          f_stat=common/fs/stat.c
+      
           # 1) 统一插入 include（若已存在则不重复）
           add_include() {
             local file="$1" anchor="$2" up="$3"
+            [ -f "$file" ] || return 0
             grep -q 'drivers/kernelsu/ksu_trace\.h' "$file" && return 0
             awk -v a="$anchor" -v up="$up" '
               BEGIN{done=0}
@@ -297,73 +295,82 @@ jobs:
               }
             ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
           }
-          
+      
           add_include "$f_input" '#include "input-poller.h"'         "../../"
           add_include "$f_pty"   '#include "tty.h"'                   "../../"
           add_include "$f_exec"  '#include <trace/hooks/sched.h>'     "../"
           add_include "$f_open"  '#include <linux/ima.h>'             "../"
           add_include "$f_rw"    '#include <linux/idr.h>'             "../"
           add_include "$f_stat"  '#include "mount.h"'                 "../"
-          
+      
           # 2) 在函数内插入 trace 调用（若已存在则跳过）
           # input_event()
-          grep -q 'trace_ksu_trace_input_hook' "$f_input" || \
-          perl -0777 -i -pe '
-            s/(void\s+input_event\s*\([^)]*\)\s*\{\s*[^;]*\bunsigned\s+long\s+flags;\s*\n)/$1\n#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_input_hook(&type, &code, &value);\n#endif\n\n/s
-          ' "$f_input"
-          
+          if [ -f "$f_input" ] && ! grep -q 'trace_ksu_trace_input_hook' "$f_input"; then
+            perl -0777 -i -pe '
+              s/(void\s+input_event\s*\([^)]*\)\s*\{\s*[^;]*\bunsigned\s+long\s+flags;\s*\n)/$1\n#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_input_hook(&type, &code, &value);\n#endif\n\n/s
+            ' "$f_input"
+          fi
+      
           # pts_unix98_lookup()
-          grep -q 'trace_ksu_trace_devpts_hook' "$f_pty" || \
-          perl -0777 -i -pe '
-            s/(static\s+struct\s+tty_struct\s*\*\s*pts_unix98_lookup\s*\([^)]*\)\s*\{\s*[^;]*\bstruct\s+tty_struct\s*\*\s*tty;\s*\n)/$1\n#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_devpts_hook((struct inode *)file->f_path.dentry->d_inode);\n#endif\n\n/s
-          ' "$f_pty"
-          
+          if [ -f "$f_pty" ] && ! grep -q 'trace_ksu_trace_devpts_hook' "$f_pty"; then
+            perl -0777 -i -pe '
+              s/(static\s+struct\s+tty_struct\s*\*\s*pts_unix98_lookup\s*\([^)]*\)\s*\{\s*[^;]*\bstruct\s+tty_struct\s*\*\s*tty;\s*\n)/$1\n#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_devpts_hook((struct inode *)file->f_path.dentry->d_inode);\n#endif\n\n/s
+            ' "$f_pty"
+          fi
+      
           # do_execve()
-          grep -q 'trace_ksu_trace_execveat_hook' "$f_exec" || \
-          perl -0777 -i -pe '
-            s/(static\s+int\s+do_execve\s*\([^)]*\)\s*\{\s*[^}]*\bstruct\s+user_arg_ptr\s+argv[^\n]*\n\s*struct\s+user_arg_ptr\s+envp[^\n]*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_execveat_hook((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n/s
-          ' "$f_exec"
-          
+          if [ -f "$f_exec" ] && ! grep -q 'trace_ksu_trace_execveat_hook' "$f_exec"; then
+            perl -0777 -i -pe '
+              s/(static\s+int\s+do_execve\s*\([^)]*\)\s*\{\s*[^}]*\bstruct\s+user_arg_ptr\s+argv[^\n]*\n\s*struct\s+user_arg_ptr\s+envp[^\n]*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_execveat_hook((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n/s
+            ' "$f_exec"
+          fi
+      
           # compat_do_execve()（32-bit su）
-          grep -q 'trace_ksu_trace_execveat_sucompat_hook' "$f_exec" || \
-          perl -0777 -i -pe '
-            s/(static\s+int\s+compat_do_execve\s*\([^)]*\)\s*\{\s*[^}]*\bstruct\s+user_arg_ptr\s+argv[^\n]*\n\s*struct\s+user_arg_ptr\s+envp[^\n]*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_execveat_sucompat_hook((int *)AT_FDCWD, &filename, NULL, NULL, NULL);\n#endif\n/s
-          ' "$f_exec"
-          
+          if [ -f "$f_exec" ] && ! grep -q 'trace_ksu_trace_execveat_sucompat_hook' "$f_exec"; then
+            perl -0777 -i -pe '
+              s/(static\s+int\s+compat_do_execve\s*\([^)]*\)\s*\{\s*[^}]*\bstruct\s+user_arg_ptr\s+argv[^\n]*\n\s*struct\s+user_arg_ptr\s+envp[^\n]*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_execveat_sucompat_hook((int *)AT_FDCWD, &filename, NULL, NULL, NULL);\n#endif\n/s
+            ' "$f_exec"
+          fi
+      
           # faccessat()
-          grep -q 'trace_ksu_trace_faccessat_hook' "$f_open" || \
-          perl -0777 -i -pe '
-            s/(SYSCALL_DEFINE3\s*\(\s*faccessat\s*,\s*int\s*,\s*dfd\s*,\s*const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*int\s*,\s*mode\s*\)\s*\{\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, NULL);\n#endif\n/s
-          ' "$f_open"
-          
+          if [ -f "$f_open" ] && ! grep -q 'trace_ksu_trace_faccessat_hook' "$f_open"; then
+            perl -0777 -i -pe '
+              s/(SYSCALL_DEFINE3\s*\(\s*faccessat\s*,\s*int\s*,\s*dfd\s*,\s*const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*int\s*,\s*mode\s*\)\s*\{\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, NULL);\n#endif\n/s
+            ' "$f_open"
+          fi
+      
           # read()
-          grep -q 'trace_ksu_trace_sys_read_hook' "$f_rw" || \
-          perl -0777 -i -pe '
-            s/(SYSCALL_DEFINE3\s*\(\s*read\s*,\s*unsigned\s+int\s*,\s*fd\s*,\s*char\s+__user\s*\*\s*,\s*buf\s*,\s*size_t\s*,\s*count\s*\)\s*\{\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_sys_read_hook(fd, &buf, &count);\n#endif\n/s
-          ' "$f_rw"
-          
+          if [ -f "$f_rw" ] && ! grep -q 'trace_ksu_trace_sys_read_hook' "$f_rw"; then
+            perl -0777 -i -pe '
+              s/(SYSCALL_DEFINE3\s*\(\s*read\s*,\s*unsigned\s+int\s*,\s*fd\s*,\s*char\s+__user\s*\*\s*,\s*buf\s*,\s*size_t\s*,\s*count\s*\)\s*\{\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_sys_read_hook(fd, &buf, &count);\n#endif\n/s
+            ' "$f_rw"
+          fi
+      
           # newfstatat()
-          grep -q 'trace_ksu_trace_stat_hook' "$f_stat" || \
-          perl -0777 -i -pe '
-            s/(SYSCALL_DEFINE4\s*\(\s*newfstatat\s*,\s*int\s*,\s*dfd\s*,\s*const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*int\s*,\s*flag\s*\)\s*\{\s*\n\s*struct\s+kstat\s+stat;\s*\n\s*int\s+error;\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_stat_hook(&dfd, &filename, &flag);\n#endif\n/s
-          ' "$f_stat"
-          
-          # fstatat64()（32bit）
-          perl -0777 -ne 'exit 1 unless /SYSCALL_DEFINE4\s*\(\s*fstatat64/;' "$f_stat" >/dev/null 2>&1 && \
-          grep -q 'trace_ksu_trace_stat_hook.*32-bit' "$f_stat" || \
-          perl -0777 -i -pe '
-            s/(SYSCALL_DEFINE4\s*\(\s*fstatat64\s*,\s*int\s*,\s*dfd\s*,\s*const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*int\s*,\s*flag\s*\)\s*\{\s*\n\s*struct\s+kstat\s+stat;\s*\n\s*int\s+error;\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_stat_hook(&dfd, &filename, &flag); /* 32-bit su support */\n#endif\n/s
-          ' "$f_stat"
-          
-          # 3) 快速校验
+          if [ -f "$f_stat" ] && ! grep -q 'trace_ksu_trace_stat_hook' "$f_stat"; then
+            perl -0777 -i -pe '
+              s/(SYSCALL_DEFINE4\s*\(\s*newfstatat\s*,\s*int\s*,\s*dfd\s*,\s*const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*int\s*,\s*flag\s*\)\s*\{\s*\n\s*struct\s+kstat\s+stat;\s*\n\s*int\s+error;\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_stat_hook(&dfd, &filename, &flag);\n#endif\n/s
+            ' "$f_stat"
+          fi
+      
+          # fstatat64()（若存在；避免注释引发 Perl 误判）
+          if [ -f "$f_stat" ] && perl -0777 -ne 'exit((<> =~ /SYSCALL_DEFINE4\s*\(\s*fstatat64/) ? 0 : 1)'; then
+            if ! perl -0777 -ne 'exit((<> =~ /SYSCALL_DEFINE4\s*\(\s*fstatat64.*?\{(?:(?!\n\}).)*?trace_ksu_trace_stat_hook\(/s) ? 0 : 1)' "$f_stat"; then
+              perl -0777 -i -pe '
+                s/(SYSCALL_DEFINE4\s*\(\s*fstatat64\s*,\s*int\s*,\s*dfd\s*,\s*const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*int\s*,\s*flag\s*\)\s*\{\s*\n\s*struct\s+kstat\s+stat;\s*\n\s*int\s+error;\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_stat_hook(&dfd, &filename, &flag);\n#endif\n/s
+              ' "$f_stat"
+            fi
+          fi
+      
+          # 快速校验
           grep -Rn 'ksu_trace\|TRACEPOINT_HOOK' -- common/{drivers/input/input.c,drivers/tty/pty.c,fs/exec.c,fs/open.c,fs/read_write.c,fs/stat.c} || true
       
-                
-          # 追加 tracepoint hooks 的额外补丁：若文件存在才应用
+          # （可选）追加 tracepoint hooks 的额外补丁：若文件存在才应用
           if [ -f "${GITHUB_WORKSPACE}/.github/workflows/6.6-tracepoint_hooks.patch" ]; then
             cp "${GITHUB_WORKSPACE}/.github/workflows/6.6-tracepoint_hooks.patch" ./
             patch -p1 -F 3 < 6.6-tracepoint_hooks.patch
           fi
+      
           echo "完成"
 
 
