@@ -269,6 +269,7 @@ jobs:
           set -Eeuo pipefail
           
           root="$PWD"     # 当前位置应在 kernel_workspace/kernel_platform
+          echo "$root"
           # 目标文件
           f_input=./common/drivers/input/input.c
           f_pty=./common/drivers/tty/pty.c
