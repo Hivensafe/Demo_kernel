@@ -391,18 +391,6 @@ jobs:
       
           # 快速校验（仅显示命中的标记）
           grep -Rn 'ksu_trace\|TRACEPOINT_HOOK' -- common/{drivers/input/input.c,drivers/tty/pty.c,fs/exec.c,fs/open.c,fs/read_write.c,fs/stat.c} || true
-
-          cp "${GITHUB_WORKSPACE}/.github/workflows/6.6-tracepoint_hooks.patch" ./6.6-tracepoint_hooks.patch
-
-          # 1) 规范化行尾并补齐末尾换行
-          sed -i 's/\r$//' 6.6-tracepoint_hooks.patch
-          tail -c1 6.6-tracepoint_hooks.patch | od -An -t u1 | grep -q 10 || echo >> 6.6-tracepoint_hooks.patch
-          
-          # 2) 在 common/ 目录应用（因为补丁是 drivers/，而你的树是 common/drivers/）
-          #    -p1 会把 a/ 或 b/ 去掉，正好命中 common/drivers/...
-          patch --batch -d common -p1 -F3 < 6.6-tracepoint_hooks.patch
-
-      
           echo "完成"
 
 
