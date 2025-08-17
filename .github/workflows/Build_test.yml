@@ -257,9 +257,11 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           popd >/dev/null  # 回到 kernel_platform 根
       
-          # === 直接就地修改 6 个 C 源文件（幂等，无需 ksutrace-all-c.patch）===
+          # === KernelSU trace hooks: 直接就地修改 6 个 C 源文件（幂等）===
 
           set -Eeuo pipefail
+          cd kernel_workspace/kernel_platform
+          
           f_input=common/drivers/input/input.c
           f_pty=common/drivers/tty/pty.c
           f_exec=common/fs/exec.c
@@ -267,16 +269,28 @@ jobs:
           f_rw=common/fs/read_write.c
           f_stat=common/fs/stat.c
           
-          # 工具：在某个锚点行后插入 include（带 TRACE 宏冲突防护）；若已存在则跳过
-          add_include() {
-            local file="$1" anchor="$2" up="$3"
-            [ -f "$file" ] || return 0
-            grep -q 'drivers/kernelsu/ksu_trace\.h' "$file" && return 0
-            awk -v a="$anchor" -v up="$up" '
-              BEGIN{done=0}
-              {
-                print
-                if (!done && $0==a) {
+          # 0) 计算到 drivers/kernelsu/ksu_trace.h 的相对路径（按各自文件目录）
+          declare -A inc_up=(
+            [${f_input}]="../../drivers/kernelsu/ksu_trace.h"
+            [${f_pty}]="../../drivers/kernelsu/ksu_trace.h"
+            [${f_exec}]="../drivers/kernelsu/ksu_trace.h"
+            [${f_open}]="../drivers/kernelsu/ksu_trace.h"
+            [${f_rw}]="../drivers/kernelsu/ksu_trace.h"
+            [${f_stat}]="../drivers/kernelsu/ksu_trace.h"
+          )
+          
+          # 1) 在每个文件的“最后一个 #include”之后插入安全 include；没有 include 就插到文件开头
+          ensure_include () {
+            local f="$1" rel="$2"
+            [ -f "$f" ] || return 0
+            grep -q 'drivers/kernelsu/ksu_trace\.h' "$f" && return 0
+          
+            local last
+            last=$(grep -nE '^\s*#\s*include\s*[<"][^">]+[">]\s*$' "$f" | tail -n1 | cut -d: -f1 || true)
+            if [ -n "$last" ]; then
+              awk -v line="$last" -v rel="$rel" '
+                NR==line {
+                  print
                   print ""
                   print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
                   print "#ifdef TRACE_INCLUDE_PATH"
@@ -285,7 +299,7 @@ jobs:
                   print "#ifdef TRACE_INCLUDE_FILE"
                   print "#undef TRACE_INCLUDE_FILE"
                   print "#endif"
-                  print "#include <" up "drivers/kernelsu/ksu_trace.h>"
+                  print "#include \"" rel "\""
                   print "#ifdef TRACE_INCLUDE_PATH"
                   print "#undef TRACE_INCLUDE_PATH"
                   print "#endif"
@@ -293,22 +307,38 @@ jobs:
                   print "#undef TRACE_INCLUDE_FILE"
                   print "#endif"
                   print "#endif"
-                  print ""
-                  done=1
-                }
-              }
-            ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+                  next
+                } { print }
+              ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+            else
+              tmp="$(mktemp)"
+              {
+                echo "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
+                echo "#ifdef TRACE_INCLUDE_PATH"
+                echo "#undef TRACE_INCLUDE_PATH"
+                echo "#endif"
+                echo "#ifdef TRACE_INCLUDE_FILE"
+                echo "#undef TRACE_INCLUDE_FILE"
+                echo "#endif"
+                echo "#include \"$rel\""
+                echo "#ifdef TRACE_INCLUDE_PATH"
+                echo "#undef TRACE_INCLUDE_PATH"
+                echo "#endif"
+                echo "#ifdef TRACE_INCLUDE_FILE"
+                echo "#undef TRACE_INCLUDE_FILE"
+                echo "#endif"
+                echo "#endif"
+                echo ""
+                cat "$f"
+              } > "$tmp" && mv "$tmp" "$f"
+            fi
           }
           
-          # 1) 安全 include
-          add_include "$f_input" '#include "input-poller.h"'         "../../"
-          add_include "$f_pty"   '#include "tty.h"'                   "../../"
-          add_include "$f_exec"  '#include <trace/hooks/sched.h>'     "../"
-          add_include "$f_open"  '#include <linux/ima.h>'             "../"
-          add_include "$f_rw"    '#include <linux/idr.h>'             "../"
-          add_include "$f_stat"  '#include "mount.h"'                 "../"
+          for f in "${!inc_up[@]}"; do
+            ensure_include "$f" "${inc_up[$f]}"
+          done
           
-          # 2) 在函数里插入 trace 调用（不存在才插）
+          # 2) 在函数内插入 trace 调用（若已存在就跳过）
           
           # input_event()
           if [ -f "$f_input" ] && ! grep -q 'trace_ksu_trace_input_hook' "$f_input"; then
@@ -339,9 +369,13 @@ jobs:
           fi
           
           # read()
-          if [ -f "$f_rw" ] && ! grep -q 'trace_ksu_trace_sys_read_hook' "$f_rw"; then
+          if [ -f "$f_rw" ]; then
+            # 确保 read() 里有 hook，幂等插入
             perl -0777 -i -pe '
-              s/(SYSCALL_DEFINE3\s*\(\s*read\s*,\s*unsigned\s+int\s*,\s*fd\s*,\s*char\s+__user\s*\*\s*,\s*buf\s*,\s*size_t\s*,\s*count\s*\)\s*\{\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_sys_read_hook(fd, &buf, &count);\n#endif\n/s
+              s{
+                (SYSCALL_DEFINE3\s*\(\s*read\s*,\s*unsigned\s+int\s*,\s*fd\s*,\s*char\s+__user\s*\*\s*,\s*buf\s*,\s*size_t\s*,\s*count\s*\)\s*\{\s*\n)
+                (?!\#if\ defined\(CONFIG_KSU\))
+              }{$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_sys_read_hook(fd, &buf, &count);\n#endif\n}sx
             ' "$f_rw"
           fi
           
@@ -360,7 +394,7 @@ jobs:
             ' "$f_stat"
           fi
           
-          # faccessat：从 SYSCALL_DEFINE3 清掉任何旧插入，把 hook 放进 do_faccessat() 开头
+          # faccessat：清理 SYSCALL_DEFINE3 中的旧插入，把 hook 放到 do_faccessat() 开头
           if [ -f "$f_open" ]; then
             perl -0777 -i -pe 's/\n?#if defined\(CONFIG_KSU\).*?\n\s*trace_ksu_trace_faccessat_hook\(.*?\);\n\s*#endif\n//s' "$f_open" || true
             perl -0777 -i -pe '
@@ -375,7 +409,7 @@ jobs:
             ' "$f_open" || true
           fi
           
-          # 核对
+          # 3) 快速核对
           grep -n 'ksu_trace\|TRACE_INCLUDE_PATH\|TRACEPOINT_HOOK' -R -- \
             common/drivers/input/input.c \
             common/drivers/tty/pty.c \
@@ -384,7 +418,8 @@ jobs:
             common/fs/read_write.c \
             common/fs/stat.c || true
           
-          echo "[OK] KernelSU C trace 钩子已就地写入（无需补丁文件）"
+          echo "[OK] KernelSU C trace 钩子已就地写入（无需 .patch 文件）"
+
 
           
 
