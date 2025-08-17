@@ -260,7 +260,6 @@ jobs:
           # === KernelSU trace hooks: 直接就地修改 6 个 C 源文件（幂等）===
 
           set -Eeuo pipefail
-          cd kernel_workspace/kernel_platform
           
           f_input=common/drivers/input/input.c
           f_pty=common/drivers/tty/pty.c
