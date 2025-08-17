@@ -240,7 +240,6 @@ jobs:
       
           # 在 common/ 内做 LZ4 清理与 SUSFS patch
           pushd common >/dev/null
-      
           if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ]; then
             files=(
               "lib/lz4/lz4_compress.c"
@@ -251,7 +250,6 @@ jobs:
             for file in "${files[@]}"; do
               [ -e "$file" ] && rm "$file"
             done
-      
             cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
             chmod +x main.bin
             ./main.bin "setup_lz4"
@@ -262,7 +260,6 @@ jobs:
             sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
             sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
           fi
-      
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           popd >/dev/null  # 回到 kernel_platform 根
       
@@ -274,7 +271,7 @@ jobs:
           f_rw=common/fs/read_write.c
           f_stat=common/fs/stat.c
       
-          # 1) 统一插入 include（包含前后都 undef 宏以避免冲突）
+          # 1) 统一插入 include（包含前后都 undef 宏，规避 trace/hooks 宏冲突）
           add_include() {
             local file="$1" anchor="$2" up="$3"
             [ -f "$file" ] || return 0
@@ -286,7 +283,6 @@ jobs:
                 if (!done && $0==a) {
                   print ""
                   print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
-                  print "/* avoid collisions with trace/hooks headers */"
                   print "#ifdef TRACE_INCLUDE_PATH"
                   print "#undef TRACE_INCLUDE_PATH"
                   print "#endif"
@@ -294,7 +290,6 @@ jobs:
                   print "#undef TRACE_INCLUDE_FILE"
                   print "#endif"
                   print "#include <" up "drivers/kernelsu/ksu_trace.h>"
-                  print "/* some trees keep these defined; clear again for safety */"
                   print "#ifdef TRACE_INCLUDE_PATH"
                   print "#undef TRACE_INCLUDE_PATH"
                   print "#endif"
@@ -308,7 +303,6 @@ jobs:
               }
             ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
           }
-      
           add_include "$f_input" '#include "input-poller.h"'         "../../"
           add_include "$f_pty"   '#include "tty.h"'                   "../../"
           add_include "$f_exec"  '#include <trace/hooks/sched.h>'     "../"
@@ -317,58 +311,85 @@ jobs:
           add_include "$f_stat"  '#include "mount.h"'                 "../"
       
           # 2) 在函数内插入 trace 调用（若已存在则跳过）
+          # input_event()
           if [ -f "$f_input" ] && ! grep -q 'trace_ksu_trace_input_hook' "$f_input"; then
             perl -0777 -i -pe '
               s/(void\s+input_event\s*\([^)]*\)\s*\{\s*[^;]*\bunsigned\s+long\s+flags;\s*\n)/$1\n#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_input_hook(&type, &code, &value);\n#endif\n\n/s
             ' "$f_input"
           fi
       
+          # pts_unix98_lookup()
           if [ -f "$f_pty" ] && ! grep -q 'trace_ksu_trace_devpts_hook' "$f_pty"; then
             perl -0777 -i -pe '
               s/(static\s+struct\s+tty_struct\s*\*\s*pts_unix98_lookup\s*\([^)]*\)\s*\{\s*[^;]*\bstruct\s+tty_struct\s*\*\s*tty;\s*\n)/$1\n#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_devpts_hook((struct inode *)file->f_path.dentry->d_inode);\n#endif\n\n/s
             ' "$f_pty"
           fi
       
+          # do_execve()
           if [ -f "$f_exec" ] && ! grep -q 'trace_ksu_trace_execveat_hook' "$f_exec"; then
             perl -0777 -i -pe '
               s/(static\s+int\s+do_execve\s*\([^)]*\)\s*\{\s*[^}]*\bstruct\s+user_arg_ptr\s+argv[^\n]*\n\s*struct\s+user_arg_ptr\s+envp[^\n]*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_execveat_hook((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n/s
             ' "$f_exec"
           fi
       
+          # compat_do_execve()（32-bit su）
           if [ -f "$f_exec" ] && ! grep -q 'trace_ksu_trace_execveat_sucompat_hook' "$f_exec"; then
             perl -0777 -i -pe '
               s/(static\s+int\s+compat_do_execve\s*\([^)]*\)\s*\{\s*[^}]*\bstruct\s+user_arg_ptr\s+argv[^\n]*\n\s*struct\s+user_arg_ptr\s+envp[^\n]*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_execveat_sucompat_hook((int *)AT_FDCWD, &filename, NULL, NULL, NULL);\n#endif\n/s
             ' "$f_exec"
           fi
       
-          if [ -f "$f_open" ] && ! grep -q 'trace_ksu_trace_faccessat_hook' "$f_open"; then
+          # faccessat() —— 先清理旧的插入，再自适应捕获形参名插入
+          if [ -f "$f_open" ]; then
+            perl -0777 -i -pe 's/\n?#if defined\(CONFIG_KSU\).*?trace_ksu_trace_faccessat_hook\(.*?\);\n#endif\n\n?//s' "$f_open"
             perl -0777 -i -pe '
-              s/(SYSCALL_DEFINE3\s*\(\s*faccessat\s*,\s*int\s*,\s*dfd\s*,\s*const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*int\s*,\s*mode\s*\)\s*\{\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, NULL);\n#endif\n/s
+              my $ok = 0;
+              # SYSCALL_DEFINE3(faccessat, int <a>, const char __user *<b>, int <c>)
+              $ok = 1 if s{
+                (SYSCALL_DEFINE3\s*\(\s*faccessat\s*,\s*
+                   int\s*,\s*([A-Za-z_]\w*)\s*,\s*
+                   const\s+char\s+__user\s*\*\s*,\s*([A-Za-z_]\w*)\s*,\s*
+                   int\s*,\s*([A-Za-z_]\w*)\s*
+                \)\s*\{\s*\n)
+              }{$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_faccessat_hook(&$2, &$3, &$4, NULL);\n#endif\n}sx;
+      
+              # 回退到 do_faccessat(int <a>, const char __user *<b>, int <c>, int <flags>)
+              if (!$ok) {
+                s{
+                  (static\s+long\s+do_faccessat\s*\(\s*
+                     int\s+([A-Za-z_]\w*)\s*,\s*
+                     const\s+char\s+__user\s*\*\s*([A-Za-z_]\w*)\s*,\s*
+                     int\s+([A-Za-z_]\w*)\s*,\s*
+                     int\s+[A-Za-z_]\w*\s*
+                  \)\s*\{\s*\n)
+                }{$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_faccessat_hook(&$2, &$3, &$4, NULL);\n#endif\n}sx;
+              }
             ' "$f_open"
           fi
       
+          # read()
           if [ -f "$f_rw" ] && ! grep -q 'trace_ksu_trace_sys_read_hook' "$f_rw"; then
             perl -0777 -i -pe '
               s/(SYSCALL_DEFINE3\s*\(\s*read\s*,\s*unsigned\s+int\s*,\s*fd\s*,\s*char\s+__user\s*\*\s*,\s*buf\s*,\s*size_t\s*,\s*count\s*\)\s*\{\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_sys_read_hook(fd, &buf, &count);\n#endif\n/s
             ' "$f_rw"
           fi
       
-          if [ -f "$f_stat" ] && ! grep -q 'SYSCALL_DEFINE4( newfstatat' "$f_stat" >/dev/null 2>&1; then :; fi
-          if [ -f "$f_stat" ] && ! grep -q 'trace_ksu_trace_stat_hook' "$f_stat"; then
+          # newfstatat()
+          if [ -f "$f_stat" ] && ! grep -q 'trace_ksu_trace_stat_hook(&dfd, &filename, &flag)' "$f_stat"; then
             perl -0777 -i -pe '
               s/(SYSCALL_DEFINE4\s*\(\s*newfstatat\s*,\s*int\s*,\s*dfd\s*,\s*const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*int\s*,\s*flag\s*\)\s*\{\s*\n\s*struct\s+kstat\s+stat;\s*\n\s*int\s+error;\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_stat_hook(&dfd, &filename, &flag);\n#endif\n/s
             ' "$f_stat"
           fi
       
-          # fstatat64() 若存在则插入
-          if [ -f "$f_stat" ] && perl -0777 -ne 'exit((<> =~ /SYSCALL_DEFINE4\s*\(\s*fstatat64/) ? 0 : 1)'; then
-            perl -0777 -ne 'exit((<> =~ /fstatat64.*trace_ksu_trace_stat_hook/s) ? 0 : 1)' "$f_stat" || \
+          # fstatat64()（若存在且未插入，则插入）
+          if [ -f "$f_stat" ] && grep -Pq 'SYSCALL_DEFINE4\s*\(\s*fstatat64' "$f_stat"; then
+            grep -q 'trace_ksu_trace_stat_hook(&dfd, &filename, &flag)' "$f_stat" || \
             perl -0777 -i -pe '
               s/(SYSCALL_DEFINE4\s*\(\s*fstatat64\s*,\s*int\s*,\s*dfd\s*,\s*const\s+char\s+__user\s*\*\s*,\s*filename\s*,\s*int\s*,\s*flag\s*\)\s*\{\s*\n\s*struct\s+kstat\s+stat;\s*\n\s*int\s+error;\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_stat_hook(&dfd, &filename, &flag);\n#endif\n/s
             ' "$f_stat"
           fi
       
-          # 快速校验
+          # 快速校验（仅显示命中的标记）
           grep -Rn 'ksu_trace\|TRACEPOINT_HOOK' -- common/{drivers/input/input.c,drivers/tty/pty.c,fs/exec.c,fs/open.c,fs/read_write.c,fs/stat.c} || true
 
           cp "${GITHUB_WORKSPACE}/.github/workflows/6.6-tracepoint_hooks.patch" ./6.6-tracepoint_hooks.patch
