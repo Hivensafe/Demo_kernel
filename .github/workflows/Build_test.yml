@@ -260,76 +260,32 @@ jobs:
           # 拷贝补丁到当前目录
           cp "${GITHUB_WORKSPACE}/ksutrace-all-c.patch" ./ksutrace-all-c.patch
           
-          # 1) 清理编码问题：去 CRLF、去 UTF-8 BOM、确保末行换行
-          # 去 CRLF
+          # 清 CRLF 和 UTF-8 BOM
           perl -i -pe 's/\r$//' ksutrace-all-c.patch
-          # 去 UTF-8 BOM（文件第一行起始的 0xEF 0xBB 0xBF）
-          perl -0777 -i -pe 's/^\x{FEFF}// if $.==0' ksutrace-all-c.patch 2>/dev/null || true
-          # 若上面一行不生效，用 sed 兜底
-          sed -i '1s/^\xEF\xBB\xBF//' ksutrace-all-c.patch || true
-          # 末行补 \n
+          sed -i '1s/^\xEF\xBB\xBF//' ksutrace-all-c.patch
+          # 末行补换行
           tail -c1 ksutrace-all-c.patch | od -An -t u1 | grep -q 10 || echo >> ksutrace-all-c.patch
           
-          # 2) 打印头几行，确认格式
-          echo "== ksutrace-all-c.patch HEAD =="
-          nl -ba ksutrace-all-c.patch | sed -n '1,80p'
-          
-          # 3) 纠正可能被错误缩进的 'diff --git' 行（必须顶格）
-          #   如果你的 patch 是从一些编辑器复制导致开头有空格，这一步会修掉
-          perl -i -pe 's/^\s+(diff --git )/$1/' ksutrace-all-c.patch
-          
-          # 4) 判断是 format-patch（以 From <sha> Mon Sep 开头）还是统一 diff
-          if grep -qE '^From [0-9a-f]{40} Mon Sep ' ksutrace-all-c.patch; then
-            echo "[info] detected format-patch; using git am ..."
-            # 用 git am 应 format-patch；保留 CR，三方合并尝试
-            git -c core.autocrlf=false am -3 --keep-cr ksutrace-all-c.patch || {
-              echo "[ERR] git am 失败，显示前后文便于定位："
-              nl -ba ksutrace-all-c.patch | sed -n '1,160p'
-              exit 1
+          # 把 hunk 正文里不以[空格/+/−/\]开头的行，自动补一个空格前缀
+          awk '
+            /^@@ /            { in=1; print; next }
+            /^diff --git/     { in=0; print; next }
+            /^--- / || /^\+\+\+ / { print; next }
+            {
+              if (in) {
+                if ($0 ~ /^[ \+\-\\]/) print;
+                else print " " $0;
+              } else print;
             }
-          else
-            echo "[info] detected unified diff; using git apply ..."
-            # 先 --check，再应用；失败时输出附近 40 行
-            if ! git apply --check ksutrace-all-c.patch; then
-              echo "[ERR] git apply --check 失败，dump 附近内容："
-              nl -ba ksutrace-all-c.patch | sed -n '1,160p'
-              exit 1
-            fi
-            git apply --index ksutrace-all-c.patch || git apply ksutrace-all-c.patch || {
-              echo "[ERR] git apply 失败，dump 更长内容："
-              nl -ba ksutrace-all-c.patch | sed -n '1,240p'
-              exit 1
-            }
-          fi
+          ' ksutrace-all-c.patch > ksutrace-all-c.fixed && mv ksutrace-all-c.fixed ksutrace-all-c.patch
           
-          # 5) 把 faccessat 的 hook 从 SYSCALL_DEFINE3 挪到 do_faccessat() 开头（自动捕获实参名）
-          f_open=common/fs/open.c
-          if [ -f "$f_open" ]; then
-            # 清理 faccessat() 中任何遗留的 trace 调用
-            perl -0777 -i -pe 's/\n?#if defined\(CONFIG_KSU\).*?\n\s*trace_ksu_trace_faccessat_hook\(.*?\);\n\s*#endif\n//s' "$f_open" || true
-            # 插到 do_faccessat() 函数体起始（捕获 dfd/filename/mode 的真实形参名）
-            perl -0777 -i -pe '
-              s{
-                (static\s+long\s+do_faccessat\s*\(\s*
-                   int\s+([A-Za-z_]\w*)\s*,\s*
-                   const\s+char\s+__user\s*\*\s*([A-Za-z_]\w*)\s*,\s*
-                   int\s+([A-Za-z_]\w*)\s*,\s*
-                   int\s+[A-Za-z_]\w*\s*
-                \)\s*\{\s*\n)
-              }{$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_faccessat_hook(&\2, &\3, &\4, NULL);\n#endif\n}sx
-            ' "$f_open" || true
-          fi
+          # 看看前 100 行确认一下
+          nl -ba ksutrace-all-c.patch | sed -n '1,100p'
           
-          # 6) 快速核对（仅显示命中的标记）
-          grep -n 'ksu_trace\|TRACE_INCLUDE_PATH\|TRACEPOINT_HOOK' -R -- \
-            common/drivers/input/input.c \
-            common/drivers/tty/pty.c \
-            common/fs/exec.c \
-            common/fs/open.c \
-            common/fs/read_write.c \
-            common/fs/stat.c || true
-          
-          echo "补丁已清理并应用完成。"
+          # 先 --check 再应用
+          git apply --check ksutrace-all-c.patch
+          git apply --index ksutrace-all-c.patch || git apply ksutrace-all-c.patch
+
 
 
 
