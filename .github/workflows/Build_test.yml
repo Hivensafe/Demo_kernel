@@ -270,12 +270,12 @@ jobs:
           
           root="$PWD"     # 当前位置应在 kernel_workspace/kernel_platform
           # 目标文件
-          f_input=common/drivers/input/input.c
-          f_pty=common/drivers/tty/pty.c
-          f_exec=common/fs/exec.c
-          f_open=common/fs/open.c
-          f_rw=common/fs/read_write.c
-          f_stat=common/fs/stat.c
+          f_input=./common/drivers/input/input.c
+          f_pty=./common/drivers/tty/pty.c
+          f_exec=./common/fs/exec.c
+          f_open=./common/fs/open.c
+          f_rw=./common/fs/read_write.c
+          f_stat=./common/fs/stat.c
           
           # 1) 统一插入 include（若已存在则不重复）
           add_include() {
