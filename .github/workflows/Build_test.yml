@@ -257,76 +257,45 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           popd >/dev/null  # 回到 kernel_platform 根
       
-          # 拷贝补丁到当前目录
-          # 0) 拷贝补丁
+          # 拷贝补丁
           cp "${GITHUB_WORKSPACE}/ksutrace-all-c.patch" ./ksutrace-all-c.patch
           
-          # 1) 清理编码：CRLF / UTF-8 BOM / 末行换行
-          perl -i -pe 's/\r$//' ksutrace-all-c.patch                       # CRLF -> LF
-          sed -i '1s/^\xEF\xBB\xBF//' ksutrace-all-c.patch || true        # 去 BOM
+          # 清理 CRLF / BOM / 末尾换行
+          perl -i -pe 's/\r$//' ksutrace-all-c.patch
+          sed -i '1s/^\xEF\xBB\xBF//' ksutrace-all-c.patch || true
           tail -c1 ksutrace-all-c.patch | od -An -t u1 | grep -q 10 || echo >> ksutrace-all-c.patch
           
-          # 2) 规范化：给 @@ 块中“没有前缀”的行补一个空格
-          #    （只处理 @@ ~ 下一段 diff / 文件结束 之间的正文；不会动 diff/---/+++ 这些头）
+          # 规范化：修正 hunk 正文行前缀（不依赖 awk）
           perl -0777 -i -pe '
-            my $t = $_;
-            $t =~ s{
-              ( ^@@[^\n]*\n )              # 1) hunk header
-              (                            # 2) hunk body (lazy)
-                .*?
-              )
-              (?= ^diff\ --git|\z )        # 3) 到下一个文件或文件末
-            }{
-              my ($h,$b)=($1,$2);
-              my @lines = split /^/m, $b;
-              for (@lines) {
-                next if /^ [\+\-\\]/;                # 正确的前缀
-                next if /^---\ |^\+\+\+\ |^index\ /; # 头部行（很少出现在 body 里，但以防万一）
-                next if $_ eq "";                    # 空行允许作为上下文行
-                s/^/ /;                              # 补一个空格作为“上下文”前缀
-              }
-              $h . join("", @lines)
-            }gemsx;
-            $_ = $t;
+            my @lines = split /\n/, $_, -1;   # 保留末尾空行
+            for (@lines) {
+              # 跳过 diff 头/文件头/hunk 头
+              next if /^diff --git / || /^index / || /^--- / || /^\+\+\+ / || /^@@ /;
+          
+              # 修正新增/删除/反斜杠行：把前置空白去掉，让符号到第1列
+              s/^\s+\+/\+/;
+              s/^\s+\-/\-/;
+              s/^\s+\\/\\/;
+          
+              # 如果是以 + - \ 开头，已正确，继续
+              next if /^[+\-\\]/;
+          
+              # 其它都应该是“上下文行”：把开头空格压成 1 个；若没有空格就补 1 个
+              if (/^ +/) { s/^ +/ / } else { $_ = " " . $_ }
+            }
+            $_ = join("\n", @lines);
           ' ksutrace-all-c.patch
           
-          # 3) 可选：把被错误缩进的 "diff --git" 顶格（一些编辑器会加空格）
+          # （可选）有些编辑器会在 "diff --git" 前加缩进，顶格一下
           perl -i -pe 's/^\s+(diff --git )/$1/' ksutrace-all-c.patch
           
-          # 4) 先 --check 再应用
-          echo "== Patch head =="
-          nl -ba ksutrace-all-c.patch | sed -n '1,80p'
+          echo "== Patch head after normalize =="
+          nl -ba ksutrace-all-c.patch | sed -n '1,120p'
+          
+          # 应用补丁
           git apply --check ksutrace-all-c.patch
           git apply --index ksutrace-all-c.patch || git apply ksutrace-all-c.patch
           
-          # 5) 把 faccessat 的 hook 移到 do_faccessat()（避免未声明形参）
-          f_open=common/fs/open.c
-          if [ -f "$f_open" ]; then
-            # 清理 faccessat() 里的旧插入
-            perl -0777 -i -pe 's/\n?#if defined\(CONFIG_KSU\).*?\n\s*trace_ksu_trace_faccessat_hook\(.*?\);\n\s*#endif\n//s' "$f_open" || true
-            # 插入到 do_faccessat() 开头，自动捕获形参名
-            perl -0777 -i -pe '
-              s{
-                (static\s+long\s+do_faccessat\s*\(\s*
-                   int\s+([A-Za-z_]\w*)\s*,\s*
-                   const\s+char\s+__user\s*\*\s*([A-Za-z_]\w*)\s*,\s*
-                   int\s+([A-Za-z_]\w*)\s*,\s*
-                   int\s+[A-Za-z_]\w*\s*
-                \)\s*\{\s*\n)
-              }{$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n\ttrace_ksu_trace_faccessat_hook(&\2, &\3, &\4, NULL);\n#endif\n}sx
-            ' "$f_open" || true
-          fi
-          
-          # 6) 快速核对
-          grep -n 'ksu_trace\|TRACE_INCLUDE_PATH\|TRACEPOINT_HOOK' -R -- \
-            common/drivers/input/input.c \
-            common/drivers/tty/pty.c \
-            common/fs/exec.c \
-            common/fs/open.c \
-            common/fs/read_write.c \
-            common/fs/stat.c || true
-          
-          echo "[OK] ksutrace-all-c.patch 已规范化并成功应用"
 
 
       - name: 🔧 Cache HMBird patch (缓存HMBird补丁)
