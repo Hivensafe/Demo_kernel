@@ -66,7 +66,7 @@ jobs:
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
         id: set_manifest
         run: |
-          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
           chmod +x main.bin
           ./main.bin "setup_device_info" "${{ github.event.inputs.REPO_MANIFEST }}"
           rm -rf ./main.bin
@@ -210,7 +210,7 @@ jobs:
             cd KernelSU
             KSU_VERSION=$(expr $(git rev-list --count main 2>/dev/null || echo 13000) + 10700)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-             cp "${GITHUB_WORKSPACE}/.github/workflows/setup.bin" ./
+             cp "${GITHUB_WORKSPACE}/.github/workflows/tools/setup.bin" ./
             chmod +x setup.bin
             if [ ! -f "kernel/Makefile" ]; then
               echo "::error ::kernel/Makefile"
@@ -243,7 +243,7 @@ jobs:
           if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ]; then
             files=(lib/lz4/lz4_compress.c lib/lz4/lz4_decompress.c lib/lz4/lz4defs.h lib/lz4/lz4hc_compress.c)
             for file in "${files[@]}"; do [ -e "$file" ] && rm "$file"; done
-            cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+            cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
             chmod +x main.bin
             ./main.bin "setup_lz4"
             rm -f ./main.bin
@@ -551,7 +551,7 @@ jobs:
             echo "保持原内核名称设置"
           fi
           ESCAPED_SUFFIX=$(printf '%s\n' "$DEFAULT_SUFFIX" | sed 's:[\/&]:\\&:g')
-          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
           sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
           
@@ -579,7 +579,7 @@ jobs:
        
       - name: 📦 Make AnyKernel3 (创建Anykernel3)
         run: |
-          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
           chmod +x main.bin
           ./main.bin "make_anykernel3"
           rm -rf ./main.bin
