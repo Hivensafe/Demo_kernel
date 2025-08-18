@@ -51,6 +51,8 @@ jobs:
   build:
     name: Build_${{ github.event.inputs.REPO_MANIFEST }}
     runs-on: ubuntu-latest
+    env:
+      ARCHIVES_DIR: archives
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,7 +65,7 @@ jobs:
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
         id: set_manifest
         run: |
-          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
           chmod +x main.bin
           ./main.bin "setup_device_info" "${{ github.event.inputs.REPO_MANIFEST }}"
           rm -rf ./main.bin
@@ -126,7 +128,7 @@ jobs:
           mkdir -p "$APT_CACHE_DIR/lists/partial"
           sudo apt -o Dir::Cache="$APT_CACHE_DIR" update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt -o Dir::Cache="$APT_CACHE_DIR" install -yq --no-install-recommends \
-            python3 p7zip-full git curl ccache libelf-dev \
+            python3 p7zip-full aria2 git curl ccache libelf-dev \
             build-essential libelf-dev flex bison libssl-dev \
             libncurses-dev liblz4-tool zlib1g-dev \
             libxml2-utils rsync unzip
@@ -165,36 +167,47 @@ jobs:
           fi
 
 
-      - name: 📥 Install repo tool (下载repo工具)
-        run: |
-         curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
-         chmod a+x ~/repo
-         sudo mv ~/repo /usr/local/bin/repo
+      # - name: 📥 Install repo tool (下载repo工具)
+      #   run: |
+      #    curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+      #    chmod a+x ~/repo
+      #    sudo mv ~/repo /usr/local/bin/repo
 
-      - name: 📥 Initialize repo and sync (初始化repo并同步内核源码)
+      # - name: 📥 Initialize repo and sync (初始化repo并同步内核源码)
+      #   run: |
+      #    mkdir kernel_workspace && cd kernel_workspace
+      #    repo init -u https://github.com/showdo/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m ${REPO_MANIFEST}.xml --depth=1
+      #    repo --trace sync -c -j$(nproc --all) --no-tags
+      - name: 📥Checkout manifest repo (下载manifest文件)
         run: |
-         mkdir kernel_workspace && cd kernel_workspace
-         repo init -u https://github.com/showdo/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m ${REPO_MANIFEST}.xml --depth=1
-         repo --trace sync -c -j$(nproc --all) --no-tags
-         rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-         rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          git clone --depth=1 \
+            -b oneplus/sm8750 \
+            https://github.com/showdo/kernel_manifest.git manifest_repo
+            
+      - name: Fetch sources with aria2c
+        run: |
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/mf_fetch.py" ./mf_fetch.py
+          mkdir -p "${ARCHIVES_DIR}"
+          python3 mf_fetch.py \
+            -m "manifest_repo/${REPO_MANIFEST}.xml" \
+            -j 8 -x 16 \
+            --allow-git-fallback
+           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c (cat拼接soc0 serial_number panic校验)
+      - name: 🔧Patch main.c (SerilID_panic校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          # 防重复 patch
           if grep -q 'SOC_SN_CHECK' init/main.c; then
             echo "main.c 已包含 patch, 跳过"
             exit 0
           fi
-      
           cp "${GITHUB_WORKSPACE}/serialid_check.c" ./
           LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
           head -n "$LINE" init/main.c > init/main.c.patched
           cat serialid_check.c >> init/main.c.patched
           tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
           mv init/main.c.patched init/main.c
-          echo "已自动插入 serialid_check.c 到 main.c"
 
 
             
@@ -207,7 +220,7 @@ jobs:
             cd KernelSU
             KSU_VERSION=$(expr $(git rev-list --count main 2>/dev/null || echo 13000) + 10700)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-             cp "${GITHUB_WORKSPACE}/.github/workflows/setup.bin" ./
+             cp "${GITHUB_WORKSPACE}/.github/workflows/tools/setup.bin" ./
             chmod +x setup.bin
             if [ ! -f "kernel/Makefile" ]; then
               echo "::error ::kernel/Makefile"
@@ -246,7 +259,7 @@ jobs:
                     fi
                 done
             
-                cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+                cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
                 chmod +x main.bin
                 ./main.bin "setup_lz4"
                 rm -rf ./main.bin
@@ -424,7 +437,7 @@ jobs:
        
       - name: 📦 Make AnyKernel3 (创建Anykernel3)
         run: |
-          cp "${GITHUB_WORKSPACE}/.github/workflows/main.bin" ./
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
           chmod +x main.bin
           ./main.bin "make_anykernel3"
           rm -rf ./main.bin
