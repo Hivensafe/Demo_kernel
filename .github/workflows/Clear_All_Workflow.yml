@@ -13,6 +13,7 @@ on:
           - Encrypt Kernel Setup Script
           - Build_serialID
           - Build_test
+          - Build_aria2c
           - test
       count:
         description: '最多清理的运行次数'
