@@ -184,16 +184,42 @@ jobs:
             -b oneplus/sm8750 \
             https://github.com/showdo/kernel_manifest.git manifest_repo
             
+      - name: Cache tarball archives
+        uses: actions/cache@v4
+        with:
+          path: archives
+          key: ${{ runner.os }}-kernel-archives-${{ hashFiles(env.MANIFEST_PATH) }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-archives-
+
       - name: Fetch sources with aria2c
         run: |
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/mf_fetch.py" ./mf_fetch.py
-          mkdir -p "${ARCHIVES_DIR}"
+          mkdir -p archives
           python3 mf_fetch.py \
             -m "manifest_repo/${REPO_MANIFEST}.xml" \
             -j 8 -x 16 \
-            --allow-git-fallback
-           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+            --allow-git-fallback \
+            --tmpdir archives
+           
+           # 1) 看每个 project 的拉取方式（tarball or git）
+          jq -r '.[] | [.name, .path, .used.source, (.used.flavor // "-")] | @tsv' _fetch_report.json \
+            | column -t | sort | sed '1i NAME\tPATH\tSOURCE\tFLAVOR'
+          
+          # 2) 核心目录是否在位
+          test -d kernel_platform/common && echo "✓ common ok" || echo "✗ common missing"
+          test -d kernel_platform/msm-kernel && echo "✓ msm-kernel ok" || echo "✗ msm-kernel missing"
+          test -f kernel_platform/WORKSPACE && echo "✓ WORKSPACE ok" || echo "✗ WORKSPACE missing"
+          
+          # 3) 检查 GitHub/GitLab 是否误留顶层目录（应该被剥掉）
+          find kernel_platform/common -maxdepth 1 -type d -name '*android_kernel_*' -print -quit | grep -q . \
+            && echo "✗ common 解包多了一层顶级目录" || echo "✓ common 顶层目录正常"
+          
+          # 4) AOSP prebuilts 是否到位（Gitiles 是扁平 tar）
+          test -d prebuilts/clang/host/linux-x86 && echo "✓ prebuilts/clang ok" || echo "✗ prebuilts/clang missing"
+
+          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+
 
       - name: 🔧Patch main.c (SerilID_panic校验)
         working-directory: kernel_workspace/kernel_platform/common
