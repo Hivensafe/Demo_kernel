@@ -48,6 +48,17 @@ def is_within_directory(directory: str, target: str) -> bool:
     abs_target = os.path.abspath(target)
     return os.path.commonprefix([abs_directory, abs_target]) == abs_directory
 
+def _same(a: Path, b: Path) -> bool:
+    """Return True if a and b refer to the same file/dir (considering symlinks)."""
+    try:
+        # Fast path: if resolves to the same absolute path
+        if a.resolve() == b.resolve():
+            return True
+        # Also try samefile (may raise if either doesn't exist)
+        return os.path.exists(a) and os.path.exists(b) and os.path.samefile(a, b)
+    except Exception:
+        return False
+
 # ---------- Archive extraction helpers ----------
 
 def extract_gitiles_flat_tar(tar_path: Path, dest: Path):
@@ -255,38 +266,64 @@ class Fetcher:
         return bool(set(self.args.groups) & set(groups))
 
     def _do_copylinks(self, proj_root: Path, items: List[Tuple[str, str, str]]):
+        """Apply <copyfile>/<linkfile> from the manifest with safe overwrites."""
         if self.args.no_copylinks or not items:
             return
+
         for kind, src, dest in items:
             src_path = (proj_root / src).resolve()
             dest_path = (self.root / dest).resolve()
+
+            # 源不存在 -> 跳过并告警
+            if not src_path.exists():
+                eprint(f"[WARN] copy/link src missing: {src_path}")
+                continue
+
+            # 目标父目录
             ensure_dir(dest_path.parent)
+
+            # ★ 先判是否同一目标（含已存在的链接/真实路径）
+            if _same(src_path, dest_path):
+                continue
+
             if kind == "copy":
-                if not src_path.exists():
-                    eprint(f"[WARN] copyfile src missing: {src_path}")
-                    continue
-                if dest_path.exists() and dest_path.is_dir() and not src_path.is_dir():
-                    shutil.rmtree(dest_path)
+                # 如目标已存在但类型与源不匹配，先清理
+                if dest_path.exists():
+                    if dest_path.is_dir() and not src_path.is_dir():
+                        shutil.rmtree(dest_path)
+                    elif dest_path.is_file() and src_path.is_dir():
+                        dest_path.unlink()
+
+                # 执行复制（目录/文件分别处理）
                 if src_path.is_dir():
                     shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
                 else:
                     shutil.copy2(src_path, dest_path)
-            else:  # link
-                try:
-                    if dest_path.exists() or dest_path.is_symlink():
-                        if dest_path.is_dir() and not src_path.is_dir():
-                            shutil.rmtree(dest_path)
-                        else:
-                            dest_path.unlink()
-                except Exception:
-                    pass
+
+            else:  # kind == "link"
+                # 若目标已是正确的 symlink，跳过
+                if dest_path.is_symlink():
+                    try:
+                        if Path(os.readlink(dest_path)).resolve() == src_path:
+                            continue
+                    except OSError:
+                        pass
+                    # symlink 目标不对，移除
+                    dest_path.unlink()
+                elif dest_path.exists():
+                    # 目标存在但不是 symlink：对齐 repo，删除后重建
+                    if dest_path.is_dir():
+                        shutil.rmtree(dest_path)
+                    else:
+                        dest_path.unlink()
+
+                # 创建 symlink；失败则复制
                 try:
                     os.symlink(src_path, dest_path, target_is_directory=src_path.is_dir())
                 except Exception:
-                    # Fallback: copy when symlink not supported
                     if src_path.is_dir():
                         shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
-                    elif src_path.exists():
+                    else:
                         shutil.copy2(src_path, dest_path)
 
     def _git_checkout(self, url: str, rev: str, dest: Path):
@@ -315,81 +352,4 @@ class Fetcher:
         try:
             if self.args.mode == "tar":
                 guess = guess_tarball_url(remote, name, rev)
-                if not guess:
-                    raise RuntimeError("No tarball URL rule for this remote")
-                url, flavor = guess
-                tmp = self.tmp / f"{slug(name)}_{slug(rev)}.tar.gz"
-                if not self.args.dry_run:
-                    ensure_dir(tmp.parent)
-                    run(["aria2c", "-x", str(self.args.connections), "-s", str(self.args.connections),
-                         "-c", "-o", tmp.name, "-d", str(tmp.parent), url])
-                    if flavor == "gitiles":
-                        extract_gitiles_flat_tar(tmp, dest)
-                    else:
-                        extract_strip_topdir_tar(tmp, dest)
-                used = {"source": "tarball", "url": url, "flavor": flavor, "archive": str(tmp)}
-            else:
-                raise RuntimeError("force git")
-        except Exception as e:
-            if self.args.allow_git_fallback:
-                eprint(f"[tar -> git] {name}: {e}")
-                url = remote.rstrip("/") + "/" + name
-                if not url.endswith(".git"):
-                    url += ".git"
-                if not self.args.dry_run:
-                    self._git_checkout(url, rev, dest)
-                used = {"source": "git", "url": url}
-            else:
-                raise
-
-        if not self.args.dry_run:
-            self._do_copylinks(dest, proj.get("copylinks", []))
-
-        with self.lock:
-            self.report.append({
-                "name": name,
-                "path": path,
-                "remote": remote,
-                "revision": rev,
-                "used": used,
-                "groups": proj.get("groups", []),
-            })
-
-    def run(self):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.args.jobs) as ex:
-            futures = [ex.submit(self._fetch_one, p) for p in self.m.projects]
-            for f in concurrent.futures.as_completed(futures):
-                f.result()
-        with open(self.root / "_fetch_report.json", "w", encoding="utf-8") as f:
-            json.dump(self.report, f, indent=2, ensure_ascii=False)
-        eprint("Report written to _fetch_report.json")
-
-# ---------- main ----------
-
-def main():
-    ap = argparse.ArgumentParser(description="Fast fetch from Android repo manifest using aria2c tarballs (with git fallback).")
-    ap.add_argument("-m", "--manifest", required=True, help="Path to manifest XML (supports local <include file=...>)")
-    ap.add_argument("-C", "--chdir", default=".", help="Target root directory (default: current working dir)")
-    ap.add_argument("-j", "--jobs", type=int, default=4, help="Parallel downloads")
-    ap.add_argument("-x", "--connections", type=int, default=16, help="Connections per download (aria2c -x/-s)")
-    ap.add_argument("--mode", choices=["tar", "git"], default="tar", help="Prefer tarball mode or force git")
-    ap.add_argument("--allow-git-fallback", action="store_true", help="Fallback to shallow git when tarball fails/unavailable")
-    ap.add_argument("--groups", type=lambda s: [x.strip() for x in s.split(",") if x.strip()], default=None,
-                    help="Comma-separated group names to include (intersection). Default: include all.")
-    ap.add_argument("--tmpdir", default="._mf_tmp", help="Where to store downloaded archives")
-    ap.add_argument("--no-copylinks", action="store_true", help="Disable copyfile/linkfile actions")
-    ap.add_argument("--dry-run", action="store_true", help="Plan only, no downloads/extracts")
-    args = ap.parse_args()
-
-    root = Path(args.chdir).resolve()
-    ensure_dir(root)
-
-    m = Manifest(base_dir=root)
-    m.load(Path(args.manifest).resolve())
-    eprint(f"Parsed projects: {len(m.projects)} | Remotes: {len(m.remotes)} | default remote={m.default_remote}")
-
-    f = Fetcher(args, m, root)
-    f.run()
-
-if __name__ == "__main__":
-    main()
+                if not
