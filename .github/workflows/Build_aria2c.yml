@@ -194,6 +194,7 @@ jobs:
 
       - name: Fetch sources with aria2c
         run: |
+          ${GITHUB_WORKSPACE}/.github/workflows/tools/mf_fetch.py ./mf_fetch.py
           mkdir -p archives
           python3 mf_fetch.py \
             -m "manifest_repo/${REPO_MANIFEST}.xml" \
