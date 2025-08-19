@@ -482,7 +482,14 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          # Add VFS configuration settings
+          # Add KSU debug and Pstore 
+          echo "CONFIG_KSU_DEBUG=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_PSTORE=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_PSTORE_RAM=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_PSTORE_RAM=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_PSTORE_CONSOLE=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_PSTORE_PMSG=y" >> ./common/arch/arm64/configs/gki_defconfig
+
           echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_TRACEPOINT_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
