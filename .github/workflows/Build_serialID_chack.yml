@@ -39,10 +39,13 @@ on:
         type: boolean
 
       enable_feature_b:
-         description: "添加BBR控制算法"
+         description: "选择网络调度"
          required: false
-         default: false
-         type: boolean
+         type: choice
+         options:
+            - 'FQ_CODEL'
+            - 'BBR'
+         default: 'FQ_CODEL'
       
        
 
@@ -63,10 +66,20 @@ jobs:
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
         id: set_manifest
         run: |
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
-          chmod +x main.bin
-          ./main.bin "setup_device_info" "${{ github.event.inputs.REPO_MANIFEST }}"
-          rm -rf ./main.bin
+          case "${{ github.event.inputs.REPO_MANIFEST }}" in
+            oneplus_ace5_pro)
+              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_pro_v" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_ace5_pro" >> $GITHUB_ENV
+              ;;
+            oneplus_13)
+              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_13_v" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_13" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "REPO_MANIFEST=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
+              echo "DEVICES_NAME=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
+              ;;
+          esac
           
       - name: ⚙️ Set KERNEL_TIME (设置构建时间)
         id: set_kernel_time
@@ -246,10 +259,22 @@ jobs:
                     fi
                 done
             
-                cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
-                chmod +x main.bin
-                ./main.bin "setup_lz4"
-                rm -rf ./main.bin
+              cp -r "${GITHUB_WORKSPACE}/zram/lz4/*" ./lib/lz4/
+              cp -r "${GITHUB_WORKSPACE}/zram/include/linux/*" ./include/linux/
+              cp "${GITHUB_WORKSPACE}/zram/6.6/lz4_1.10.0.patch" ./
+              patch -p1 -F 3 --fuzz=5 < lz4_1.10.0.patch || true
+              
+              if [ -f "fs/f2fs/Makefile" ]; then
+                  if ! grep -qF "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" "fs/f2fs/Makefile"; then
+                      echo "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" >> "fs/f2fs/Makefile"
+                      echo "已添加: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
+                  else
+                      echo "文件已经包含: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
+                  fi
+              else
+                  echo "文件不存在: fs/f2fs/Makefile"
+              fi
+              }
             fi
             
             if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" != "oneplus_pad_2_pro" ]; then
@@ -310,18 +335,28 @@ jobs:
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KERNEL_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig          
 
-          # 网络队列/调度/流量控制
-          echo "CONFIG_NET_SCH_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_SCH_SFQ=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_SCH_HTB=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_SCH_TBF=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_SCH_SFB=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_SCH_RED=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_SCH_INGRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_DEFAULT_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_DEFAULT_NET_SCH="fq_codel"' >> ./common/arch/arm64/configs/gki_defconfig
-
+          if [ "$ENABLE_B" = "BBR" ]; then
+            echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_BIC=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_CUBIC=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_WESTWOOD=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_HTCP=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+          if [ "$ENABLE_B" = "FQ_CODEL" ]; then
+            echo "CONFIG_NET_SCH_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_SFQ=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_HTB=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_TBF=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_SFB=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_RED=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_INGRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_DEFAULT_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo 'CONFIG_DEFAULT_NET_SCH="fq_codel"' >> ./common/arch/arm64/configs/gki_defconfig
+          fi
           
           # Add SUSFS configuration settings
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -339,17 +374,6 @@ jobs:
           echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          # Add BBR
-          if [ "$ENABLE_B" = "true" ]; then
-            echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_BIC=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_CUBIC=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_WESTWOOD=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_HTCP=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> ./common/arch/arm64/configs/gki_defconfig
-          fi
           #Remove check_defconfig
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
           cd common
@@ -424,10 +448,12 @@ jobs:
        
       - name: 📦 Make AnyKernel3 (创建Anykernel3)
         run: |
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
-          chmod +x main.bin
-          ./main.bin "make_anykernel3"
-          rm -rf ./main.bin
+          git clone https://github.com/showdo/AnyKernel3.git --depth=1      
+          rm -rf ./AnyKernel3/.git
+          rm -rf ./AnyKernel3/push.sh
+          cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./AnyKernel3/
+          7z a -t7z -p'501b10728d2cb08abe16eb8b0bdee33c9d2382e1' -mhe=on ./AnyKernel3/TG频道@qdykernel.7z ./AnyKernel3/Image
+          rm -rf ./AnyKernel3/Image
           
       - name: 📤 Upload AnyKernel3 (上传 Anykernel3)
         uses: actions/upload-artifact@v4
