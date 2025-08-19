@@ -1,4 +1,4 @@
-name: Build_test
+name: Build_TracePoint_test
 on:
   workflow_dispatch:
     inputs:
@@ -191,7 +191,7 @@ jobs:
             exit 0
           fi
       
-          cp "${GITHUB_WORKSPACE}/serialid_check.c" ./
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
           LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
           head -n "$LINE" init/main.c > init/main.c.patched
           cat serialid_check.c >> init/main.c.patched
