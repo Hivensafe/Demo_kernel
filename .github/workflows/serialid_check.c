@@ -16,8 +16,7 @@
 #define SYSFS_SN_PATH       "/sys/module/oplusboot/parameters/serialno"
 
 /*
- * 镜像内固化的 32 字节 ASCII 期望值（量产时批量替换为你的 32 字符小写 hex）
- * 可将下面的占位直接改成你的 32 字符；或在出包后用十六进制把这 32 字节替换掉。
+ * 镜像内固化的 32 字节 ASCII 期望值
  */
 __attribute__((used))
 __attribute__((aligned(16)))
@@ -103,7 +102,7 @@ static int sha256_hex_sn_suffix(const char *sn, char hex64[65])
     return 0;
 }
 
-/* 线程：2 分钟后校验；-EACCES 回落到 cmdline；其余失败不 panic（与你原先一致） */
+/* 线程：2 分钟后校验；-EACCES 回落到 cmdline；其余失败不 panic */
 static int serialid_checker_thread(void *data)
 {
     msleep(2 * 60 * 1000);
