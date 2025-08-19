@@ -66,10 +66,20 @@ jobs:
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
         id: set_manifest
         run: |
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
-          chmod +x main.bin
-          ./main.bin "setup_device_info" "${{ github.event.inputs.REPO_MANIFEST }}"
-          rm -rf ./main.bin
+          case "${{ github.event.inputs.REPO_MANIFEST }}" in
+            oneplus_ace5_pro)
+              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_pro_v" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_ace5_pro" >> $GITHUB_ENV
+              ;;
+            oneplus_13)
+              echo "REPO_MANIFEST=JiuGeFaCai_oneplus_13_v" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_13" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "REPO_MANIFEST=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
+              echo "DEVICES_NAME=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
+              ;;
+          esac
           
       - name: ⚙️ Set KERNEL_TIME (设置构建时间)
         id: set_kernel_time
@@ -233,21 +243,37 @@ jobs:
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-          cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux
-          cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib
-          cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto
-          cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
-      
-          # 在 common/ 内做 LZ4 清理与 SUSFS patch
           pushd common >/dev/null
           if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ]; then
-            files=(lib/lz4/lz4_compress.c lib/lz4/lz4_decompress.c lib/lz4/lz4defs.h lib/lz4/lz4hc_compress.c)
-            for file in "${files[@]}"; do [ -e "$file" ] && rm "$file"; done
-            cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
-            chmod +x main.bin
-            ./main.bin "setup_lz4"
-            rm -f ./main.bin
-          fi
+                files=(
+                    "lib/lz4/lz4_compress.c"
+                    "lib/lz4/lz4_decompress.c"
+                    "lib/lz4/lz4defs.h"
+                    "lib/lz4/lz4hc_compress.c"
+                )
+                for file in "${files[@]}"; do
+                    if [ -e "$file" ]; then
+                        rm "$file"
+                    fi
+                done
+            
+              cp -r "${GITHUB_WORKSPACE}/zram/lz4/*" ./lib/lz4/
+              cp -r "${GITHUB_WORKSPACE}/zram/include/linux/*" ./include/linux/
+              cp "${GITHUB_WORKSPACE}/zram/6.6/lz4_1.10.0.patch" ./
+              patch -p1 -F 3 --fuzz=5 < lz4_1.10.0.patch || true
+              
+              if [ -f "fs/f2fs/Makefile" ]; then
+                  if ! grep -qF "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" "fs/f2fs/Makefile"; then
+                      echo "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" >> "fs/f2fs/Makefile"
+                      echo "已添加: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
+                  else
+                      echo "文件已经包含: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
+                  fi
+              else
+                  echo "文件不存在: fs/f2fs/Makefile"
+              fi
+              }
+            fi
       
           if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" != "oneplus_pad_2_pro" ]; then
             sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
@@ -551,7 +577,6 @@ jobs:
             echo "保持原内核名称设置"
           fi
           ESCAPED_SUFFIX=$(printf '%s\n' "$DEFAULT_SUFFIX" | sed 's:[\/&]:\\&:g')
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
           sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
           
@@ -579,10 +604,12 @@ jobs:
        
       - name: 📦 Make AnyKernel3 (创建Anykernel3)
         run: |
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/main.bin" ./
-          chmod +x main.bin
-          ./main.bin "make_anykernel3"
-          rm -rf ./main.bin
+          git clone https://github.com/showdo/AnyKernel3.git --depth=1      
+          rm -rf ./AnyKernel3/.git
+          rm -rf ./AnyKernel3/push.sh
+          cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./AnyKernel3/
+          7z a -t7z -p'501b10728d2cb08abe16eb8b0bdee33c9d2382e1' -mhe=on ./AnyKernel3/TG频道@qdykernel.7z ./AnyKernel3/Image
+          rm -rf ./AnyKernel3/Image
           
       - name: 📤 Upload AnyKernel3 (上传 Anykernel3)
         uses: actions/upload-artifact@v4
