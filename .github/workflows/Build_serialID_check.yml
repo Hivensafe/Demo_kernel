@@ -1,4 +1,4 @@
-name: Build_serialID_chack
+name: Build_serialID_check
 on:
   workflow_dispatch:
     inputs:
