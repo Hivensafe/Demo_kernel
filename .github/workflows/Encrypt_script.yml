@@ -1,4 +1,4 @@
-name: Encrypt Kernel Setup Script
+name: Encrypt_script
 
 on:
   workflow_dispatch:
