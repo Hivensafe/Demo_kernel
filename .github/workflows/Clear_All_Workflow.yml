@@ -10,9 +10,9 @@ on:
         default: 'Build_oneplus_sm8750'
         options:
           - Build_oneplus_sm8750
-          - Encrypt Kernel Setup Script
-          - Build_serialID
-          - Build_test
+          - Encrypt_script
+          - Build_serialID_chack
+          - Build_TracePoint_test
           - Build_aria2c
           - test
       count:
