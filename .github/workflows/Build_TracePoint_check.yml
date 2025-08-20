@@ -319,7 +319,8 @@ jobs:
           echo "CONFIG_PSTORE_CONSOLE=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_PSTORE_PMSG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_PANIC_TIMEOUT=5" >> ./common/arch/arm64/configs/gki_defconfig
-
+          echo "CONFIG_PSTORE_COMPRESS=n" >> ./common/arch/arm64/configs/gki_defconfig
+          
           
           echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_TRACEPOINT_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
