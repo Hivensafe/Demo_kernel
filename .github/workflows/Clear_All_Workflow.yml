@@ -7,12 +7,13 @@ on:
         type: choice
         description: '清理的工作流名称'
         required: true
-        default: 'Build_oneplus_sm8750'
+        default: 'Build_serialID_check'
         options:
           - Build_oneplus_sm8750
           - Encrypt_script
-          - Build_serialID_chack
+          - Build_serialID_check
           - Build_TracePoint_test
+          - Build_TracePoint_check
           - Build_aria2c
           - test
       count:
