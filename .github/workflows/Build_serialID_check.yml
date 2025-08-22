@@ -65,9 +65,6 @@ jobs:
           df -h
       
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
-        env:
-          KEEP_ORIGINAL: ${{ github.event.inputs.keep_original_settings }}
-          CUSTOM_SUFFIX: ${{ github.event.inputs.custom_kernel_suffix }}
         run: |
           case "${{ github.event.inputs.REPO_MANIFEST }}" in
             oneplus_ace5_pro)
@@ -83,7 +80,7 @@ jobs:
               echo "DEVICES_NAME=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
               ;;
           esac
-          case "$DEVICES_NAME" in
+          case "${{ github.event.inputs.REPO_MANIFEST }}" in
             oneplus_13 | oneplus_ace5_pro | realme_GT7pro_Speed)
               echo 'DEFAULT_SUFFIX=-android15-8-g013ec21bba94-abogki383916444-4k' >> $GITHUB_ENV
               ;;
@@ -103,11 +100,11 @@ jobs:
               echo 'DEFAULT_SUFFIX="-android15-8-g29d86c5fc9dd-abogki428889875-4k' >> $GITHUB_ENV
               ;;
           esac
-          if [ "$KEEP_ORIGINAL" = "false" ] && [ -n "$CUSTOM_TIME" ]; then
+          if [ "${{ github.event.inputs.keep_original_settings }}" = "false" ] && [ -n "${{ github.event.inputs.custom_kernel_suffix }}" ]; then
             echo "使用自定义构建时间: $CUSTOM_TIME"
             echo "KERNEL_TIME=$CUSTOM_TIME" >> $GITHUB_ENV
           else
-            case "$DEVICES_NAME" in
+            case "${{ github.event.inputs.REPO_MANIFEST }}" in
               oneplus_13 | oneplus_ace5_pro | realme_GT7pro_Speed)
                 echo 'KERNEL_TIME=Tue Dec 17 23:36:49 UTC 2024' >> $GITHUB_ENV
                 ;;
