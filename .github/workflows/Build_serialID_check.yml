@@ -82,19 +82,19 @@ jobs:
           esac
           case "$DEVICES_NAME" in
             oneplus_13 | oneplus_ace5_pro | realme_GT7pro_Speed)
-              DEFAULT_SUFFIX="-android15-8-g013ec21bba94-abogki383916444-4k"
+              echo 'DEFAULT_SUFFIX=-android15-8-g013ec21bba94-abogki383916444-4k' >> $GITHUB_ENV
               ;;
             realme_GT7pro)
-              DEFAULT_SUFFIX="-android15-8-gc6f5283046c6-ab12364222-4k"
+              echo 'DEFAULT_SUFFIX="-android15-8-gc6f5283046c6-ab12364222-4k' >> $GITHUB_ENV
               ;;
             oneplus_13t)
-              DEFAULT_SUFFIX="-android15-8-gd43086512890-abogki423825152-4k"
+              echo 'DEFAULT_SUFFIX="-android15-8-gd43086512890-abogki423825152-4k' >> $GITHUB_ENV
               ;;
             oneplus_pad_2_pro)
-              DEFAULT_SUFFIX="-android15-8-g7b1f455c7143-ab13591283-4k"
+              echo 'DEFAULT_SUFFIX="-android15-8-g7b1f455c7143-ab13591283-4k' >> $GITHUB_ENV
               ;;
             oneplus_ace5_ultra)
-              DEFAULT_SUFFIX="-android15-8-g29d86c5fc9dd-abogki428889875-4k"
+              echo 'DEFAULT_SUFFIX="-android15-8-g29d86c5fc9dd-abogki428889875-4k' >> $GITHUB_ENV
               ;;
           esac
           if [ "$KEEP_ORIGINAL" = "false" ] && [ -n "$CUSTOM_TIME" ]; then
@@ -143,7 +143,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ${{ env.HOME }}/apt-cache
-          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/Build_oneplus_sm875-Image.yml') }}
+          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/Build_serialID_check.yml') }}
           restore-keys: |
             ${{ runner.os }}-apt-
 
