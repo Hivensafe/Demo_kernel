@@ -80,30 +80,45 @@ jobs:
               echo "DEVICES_NAME=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
               ;;
           esac
-          
-      - name: ⚙️ Set KERNEL_TIME (设置构建时间)
-        id: set_kernel_time
-        run: |
+          case "$DEVICES_NAME" in
+            oneplus_13 | oneplus_ace5_pro | realme_GT7pro_Speed)
+              DEFAULT_SUFFIX="-android15-8-g013ec21bba94-abogki383916444-4k"
+              ;;
+            realme_GT7pro)
+              DEFAULT_SUFFIX="-android15-8-gc6f5283046c6-ab12364222-4k"
+              ;;
+            oneplus_13t)
+              DEFAULT_SUFFIX="-android15-8-gd43086512890-abogki423825152-4k"
+              ;;
+            oneplus_pad_2_pro)
+              DEFAULT_SUFFIX="-android15-8-g7b1f455c7143-ab13591283-4k"
+              ;;
+            oneplus_ace5_ultra)
+              DEFAULT_SUFFIX="-android15-8-g29d86c5fc9dd-abogki428889875-4k"
+              ;;
+          esac
           if [ "$KEEP_ORIGINAL" = "false" ] && [ -n "$CUSTOM_TIME" ]; then
             echo "使用自定义构建时间: $CUSTOM_TIME"
             echo "KERNEL_TIME=$CUSTOM_TIME" >> $GITHUB_ENV
           else
             case "$DEVICES_NAME" in
-              oneplus_13 | oneplus_ace5_pro | realme_GT7pro | realme_GT7pro_Speed)
+              oneplus_13 | oneplus_ace5_pro | realme_GT7pro_Speed)
                 echo 'KERNEL_TIME=Tue Dec 17 23:36:49 UTC 2024' >> $GITHUB_ENV
                 ;;
+              realme_GT7pro)
+                echo 'KERNEL_TIME=Fri Sep 13 02:08:57 UTC 2024' >> $GITHUB_ENV
+                ;;
               oneplus_13t)
-                echo 'KERNEL_TIME=FriApr 25 01:56:53 UTC 2025' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Tue Jun 10 12:12:23 UTC 2025' >> $GITHUB_ENV
                 ;;
               oneplus_pad_2_pro)
-                echo 'KERNEL_TIME=Wed Dec 11 19:16:38 UTC 2024' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Tue Jun  3 03:22:33 UTC 2025' >> $GITHUB_ENV
                 ;;
               oneplus_ace5_ultra)
-                echo 'KERNEL_TIME=Fri Apr 18 19:35:07 UTC 2025' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Tue Jul  1 19:48:18 UTC 2025' >> $GITHUB_ENV
                 ;;
             esac
           fi
-
       - name: ⚙️ Set device-specific CCACHE_DIR (设置对应机型Cceche路径)
         run: |
           echo "CCACHE_DIR=$HOME/.ccache_${REPO_MANIFEST}" >> $GITHUB_ENV
@@ -369,29 +384,13 @@ jobs:
           cd common
           git add -A && git commit -a -m "BUILD Kernel"
 
-      - name: 🔧 Set Kernel name (设置内核名称)
+      - name: 🔧 Set Kernel name (写入内核名称)
         env:
           REPO_MANIFEST: ${{ github.event.inputs.REPO_MANIFEST }}
           KEEP_ORIGINAL: ${{ github.event.inputs.keep_original_settings }}
           CUSTOM_SUFFIX: ${{ github.event.inputs.custom_kernel_suffix }}
         run: |
           cd kernel_workspace/kernel_platform
-
-          case "$DEVICES_NAME" in
-            oneplus_13 | oneplus_ace5_pro | realme_GT7pro | realme_GT7pro_Speed)
-              DEFAULT_SUFFIX="-android15-8-g013ec21bba94-abogki383916444-4k"
-              ;;
-            oneplus_13t)
-              DEFAULT_SUFFIX="-android15-8-gba3bcfd39307-abogki413159095-4k"
-              ;;
-            oneplus_pad_2_pro)
-              DEFAULT_SUFFIX="-android15-8-g302cb15749a8-ab13157299-4k"
-              ;;
-            oneplus_ace5_ultra)
-              DEFAULT_SUFFIX="-android15-8-g29d86c5fc9dd-abogki428889875-4k"
-              ;;
-          esac
-          
           echo "当前机型: $DEVICES_NAME"
           echo "保持原设置: $KEEP_ORIGINAL"
           echo "自定义后缀: $CUSTOM_SUFFIX"
@@ -418,8 +417,28 @@ jobs:
          git clone https://github.com/HanKuCha/sched_ext.git
          cp -r ./sched_ext/* ./common/kernel/sched
          rm -rf ./sched_ext/.git
-         cd common/kernel/sched  
+         cd common/kernel/sched 
 
+
+         
+      - name: 🔧Fix Error And Set Kernel Version (修正错误及版本)
+        run: |
+          case "$DEVICES_NAME" in
+              oneplus_ace5_ultra)
+                sed -i -E \
+                -e 's/^([[:space:]]*)int[[:space:]]+ret[[:space:]]*=[[:space:]]*path_umount\(([^)]*)\)[[:space:]]*;$/\1path_umount(\2);/' \
+                -e 's/^([[:space:]]*)return[[:space:]]+path_umount\(([^)]*)\)[[:space:]]*;$/\1path_umount(\2);/' \
+                -e '/^[[:space:]]*\(void\)ret;[[:space:]]*$/d' \
+                drivers/kernelsu/core_hook.c
+                sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
+                ;;
+              oneplus_13t)
+                sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
+                ;;
+          esac
+
+
+        
       - name: 🔨 Build Kernel (构建内核)
         run: |
           export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86/clang-r510928/bin:$PATH"          
@@ -430,14 +449,6 @@ jobs:
           export CCACHE_MAXSIZE="8G"
           export KBUILD_BUILD_TIMESTAMP="${KERNEL_TIME}"
           cd kernel_workspace/kernel_platform/common
-          if [ "$DEVICES_NAME" = "oneplus_ace5_ultra" ]; then
-            sed -i -E \
-            -e 's/^([[:space:]]*)int[[:space:]]+ret[[:space:]]*=[[:space:]]*path_umount\(([^)]*)\)[[:space:]]*;$/\1path_umount(\2);/' \
-             -e 's/^([[:space:]]*)return[[:space:]]+path_umount\(([^)]*)\)[[:space:]]*;$/\1path_umount(\2);/' \
-             -e '/^[[:space:]]*\(void\)ret;[[:space:]]*$/d' \
-            drivers/kernelsu/core_hook.c
-            sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
-          fi
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  gki_defconfig
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  Image
        
