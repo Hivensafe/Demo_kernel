@@ -65,7 +65,9 @@ jobs:
           df -h
       
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
-        id: set_manifest
+        env:
+          KEEP_ORIGINAL: ${{ github.event.inputs.keep_original_settings }}
+          CUSTOM_SUFFIX: ${{ github.event.inputs.custom_kernel_suffix }}
         run: |
           case "${{ github.event.inputs.REPO_MANIFEST }}" in
             oneplus_ace5_pro)
