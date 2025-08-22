@@ -432,6 +432,7 @@ jobs:
          
       - name: 🔧Fix Error And Set Kernel Version (修正错误及版本)
         run: |
+          cd kernel_workspace/kernel_platform/common
           case "$DEVICES_NAME" in
               oneplus_ace5_ultra)
                 sed -i -E \
