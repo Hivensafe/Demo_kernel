@@ -385,13 +385,10 @@ jobs:
               DEFAULT_SUFFIX="-android15-8-gba3bcfd39307-abogki413159095-4k"
               ;;
             oneplus_pad_2_pro)
-              DEFAULT_SUFFIX="-android15-8-g0261dbe3cf7e-ab12786384-4k"
+              DEFAULT_SUFFIX="-android15-8-g302cb15749a8-ab13157299-4k"
               ;;
             oneplus_ace5_ultra)
-              DEFAULT_SUFFIX="-android15-8-gfc70d29746a7-abogki412262948-4k"
-              ;;
-            oneplus_pad_2_pro_New)
-              DEFAULT_SUFFIX="-android15-8-g302cb15749a8-ab13157299-4k"
+              DEFAULT_SUFFIX="-android15-8-g29d86c5fc9dd-abogki428889875-4k"
               ;;
           esac
           
@@ -439,6 +436,7 @@ jobs:
              -e 's/^([[:space:]]*)return[[:space:]]+path_umount\(([^)]*)\)[[:space:]]*;$/\1path_umount(\2);/' \
              -e '/^[[:space:]]*\(void\)ret;[[:space:]]*$/d' \
             drivers/kernelsu/core_hook.c
+            sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
           fi
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  gki_defconfig
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  Image
