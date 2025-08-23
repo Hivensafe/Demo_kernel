@@ -483,8 +483,8 @@ jobs:
       - name: 📤 Upload Image (上传 Image)
         uses: actions/upload-artifact@v4
         with:
-         name: ${{ env.IMAGE_NAME }}
-         path: kernel_workspace/kernel_platform/common/out/arch/arm64/boot/${IMAGENAME}
+         name: ${{ env.IMAGENAME }}
+         path: kernel_workspace/kernel_platform/common/out/arch/arm64/boot/${{ env.IMAGENAME }}
         
       - name: 📦 Make AnyKernel3 (创建Anykernel3)
         run: |
