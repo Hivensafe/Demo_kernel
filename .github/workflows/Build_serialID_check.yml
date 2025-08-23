@@ -478,7 +478,7 @@ jobs:
       - name: 📦 ReName Image  (修改镜像名)
         run: |
           cd kernel_workspace/kernel_platform/common/out/arch/arm64/boot
-          cp ./Image "./${IMAGE_NAME}"
+          cp ./Image "./${IMAGENAME}"
 
       - name: 📤 Upload Image (上传 Image)
         uses: actions/upload-artifact@v4
