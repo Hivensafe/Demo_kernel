@@ -70,14 +70,42 @@ jobs:
             oneplus_ace5_pro)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_pro_v" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_ace5_pro" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_Ace_5" >> $GITHUB_ENV
               ;;
             oneplus_13)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_13_v" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_13" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_13" >> $GITHUB_ENV
               ;;
-            *)
-              echo "REPO_MANIFEST=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
-              echo "DEVICES_NAME=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
+            oneplus_13t)
+              echo "REPO_MANIFEST=oneplus_13t" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_13t" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_13_T" >> $GITHUB_ENV
+              ;;
+            oneplus_pad_2_pro)
+              echo "REPO_MANIFEST=oneplus_pad_2_pro" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_pad_2_pro" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_Pad_2_Pro_New" >> $GITHUB_ENV
+              ;;
+            oneplus_ace5_ultra)
+              echo "REPO_MANIFEST=oneplus_ace5_ultra" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_ace5_ultra" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_Ace_5_Ultra" >> $GITHUB_ENV
+              ;;
+            realme_GT7)
+              echo "REPO_MANIFEST=realme_GT7" >> $GITHUB_ENV
+              echo "DEVICES_NAME=realme_GT7" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Rm_GT_7" >> $GITHUB_ENV
+              ;;
+            realme_GT7pro)
+              echo "REPO_MANIFEST=realme_GT7pro" >> $GITHUB_ENV
+              echo "DEVICES_NAME=realme_GT7pro" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Rm_GT_7_Pro" >> $GITHUB_ENV
+              ;;
+            realme_GT7pro_Speed)
+              echo "REPO_MANIFEST=realme_GT7pro_Speed" >> $GITHUB_ENV
+              echo "DEVICES_NAME=realme_GT7pro_Speed" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Rm_GT_7_Pro_Speed" >> $GITHUB_ENV
               ;;
           esac
           case "${{ github.event.inputs.REPO_MANIFEST }}" in
@@ -447,7 +475,17 @@ jobs:
           fi
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  gki_defconfig
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  Image
-       
+      - name: 📦 ReName Image  (修改镜像名)
+        run: |
+          cd kernel_workspace/kernel_platform/common/out/arch/arm64/boot
+          cp ./Image ./${{ env.IMAGE_NAME }}
+
+      - name: 📤 Upload Image (上传 Image)
+        uses: actions/upload-artifact@v4
+        with:
+         name: ${{ env.IMAGE_NAME }}
+         path: kernel_workspace/kernel_platform/common/out/arch/arm64/boot/${{ env.IMAGE_NAME }}
+        
       - name: 📦 Make AnyKernel3 (创建Anykernel3)
         run: |
           git clone https://github.com/showdo/AnyKernel3.git --depth=1      
