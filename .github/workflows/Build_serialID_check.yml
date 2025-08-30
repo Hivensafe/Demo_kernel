@@ -109,10 +109,10 @@ jobs:
               ;;
           esac
           case "${{ github.event.inputs.REPO_MANIFEST }}" in
-            oneplus_13)
+            oneplus_13 | oneplus_ace5_pro)
               echo 'DEFAULT_SUFFIX=-android15-8-g4dc61d72e02f-abogki415959920-4k' >> $GITHUB_ENV
               ;;
-            oneplus_ace5_pro | realme_GT7pro_Speed)
+            realme_GT7pro_Speed)
               echo 'DEFAULT_SUFFIX=-android15-8-g013ec21bba94-abogki383916444-4k' >> $GITHUB_ENV
               ;;
             realme_GT7)
@@ -136,10 +136,10 @@ jobs:
             echo "KERNEL_TIME=$CUSTOM_TIME" >> $GITHUB_ENV
           else
             case "${{ github.event.inputs.REPO_MANIFEST }}" in
-              oneplus_13)
+              oneplus_13 | oneplus_ace5_pro)
                 echo 'KERNEL_TIME=Mon May 12 09:09:59 UTC 2025' >> $GITHUB_ENV
                 ;;
-              oneplus_ace5_pro | realme_GT7pro_Speed)
+              realme_GT7pro_Speed)
                 echo 'KERNEL_TIME=Tue Dec 17 23:36:49 UTC 2024' >> $GITHUB_ENV
                 ;;
               realme_GT7)
@@ -326,7 +326,7 @@ jobs:
               fi
           fi
           
-          if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" != "oneplus_pad_2_pro" ] && [ "${REPO_MANIFEST}" != "realme_GT7" ] && [ "${REPO_MANIFEST}" != "oneplus_13" ]; then
+          if [ "${REPO_MANIFEST}" = "realme_GT7pro_Speed" ] && [ "${REPO_MANIFEST}" = "realme_GT7pro" ]; then
               sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
               sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
           fi
@@ -472,13 +472,6 @@ jobs:
           export CCACHE_MAXSIZE="8G"
           export KBUILD_BUILD_TIMESTAMP="${KERNEL_TIME}"
           cd kernel_workspace/kernel_platform/common
-          # if [ "${REPO_MANIFEST}" = "oneplus_ace5_ultra" ]; then
-          #   sed -i -E \
-          #       -e 's/^([[:space:]]*)int[[:space:]]+ret[[:space:]]*=[[:space:]]*path_umount\(([^)]*)\)[[:space:]]*;$/\1path_umount(\2);/' \
-          #       -e 's/^([[:space:]]*)return[[:space:]]+path_umount\(([^)]*)\)[[:space:]]*;$/\1path_umount(\2);/' \
-          #       -e '/^[[:space:]]*\(void\)ret;[[:space:]]*$/d' \
-          #       drivers/kernelsu/core_hook.c
-          # fi
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  gki_defconfig
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  Image
       - name: 📦 ReName Image  (修改镜像名)
