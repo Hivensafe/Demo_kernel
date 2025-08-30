@@ -1,0 +1,362 @@
+diff --git a/drivers/input/input.c b/drivers/input/input.c
+index 8c5fdb0f8..1f2a0b7ab 100644
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -29,6 +29,34 @@
+ #include "input-core-private.h"
+ #include "input-poller.h"
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <linux/kernel.h>
++#include <linux/percpu.h>
++#include <linux/preempt.h>
++#include <linux/interrupt.h>
++#include <linux/sched.h>
++#include <linux/sched/task.h>
++#include <linux/pid.h>
++#include <../../drivers/kernelsu/ksu_trace.h>
++
++/* --- KSU trace guard (local TU) --- */
++static DEFINE_PER_CPU(unsigned int, ksu_tp_depth);
++static __always_inline bool ksu_trace_enter(void)
++{
++	bool ok = false;
++	preempt_disable();
++	if (__this_cpu_read(ksu_tp_depth) == 0) {
++		__this_cpu_inc(ksu_tp_depth);
++		ok = true;
++	}
++	preempt_enable();
++	return ok;
++}
++static __always_inline void ksu_trace_exit(void)
++{ preempt_disable(); __this_cpu_dec(ksu_tp_depth); preempt_enable(); }
++static __always_inline bool ksu_runtime_ready(void)
++{ return likely(system_state == SYSTEM_RUNNING) && likely(!in_interrupt()) && likely(!(current->flags & PF_KTHREAD)) && likely(pid_task(find_vpid(1), PIDTYPE_PID)); }
++#endif
++
+ MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
+ MODULE_DESCRIPTION("Input core");
+ MODULE_LICENSE("GPL");
+@@ -429,6 +457,13 @@ void input_event(struct input_dev *dev,
+ {
+ 	unsigned long flags;
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++	/* input_event 可能在中断/软中断上下文触发：严格筛选 */
++	if (likely(ksu_runtime_ready()) && ksu_trace_enter()) {
++		trace_ksu_trace_input_hook(&type, &code, &value);
++		ksu_trace_exit();
++	}
++#endif
+ 	if (is_event_supported(type, dev->evbit, EV_MAX)) {
+ 
+ 		spin_lock_irqsave(&dev->event_lock, flags);
+diff --git a/drivers/tty/pty.c b/drivers/tty/pty.c
+index df08f1305..6d1c4e8ce 100644
+--- a/drivers/tty/pty.c
++++ b/drivers/tty/pty.c
+@@ -31,6 +31,34 @@
+ #include <linux/compat.h>
+ #include "tty.h"
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <linux/kernel.h>
++#include <linux/fs.h>
++#include <linux/percpu.h>
++#include <linux/preempt.h>
++#include <linux/interrupt.h>
++#include <linux/sched.h>
++#include <linux/sched/task.h>
++#include <linux/pid.h>
++#include <../../drivers/kernelsu/ksu_trace.h>
++
++/* --- KSU trace guard (local TU) --- */
++static DEFINE_PER_CPU(unsigned int, ksu_tp_depth);
++static __always_inline bool ksu_trace_enter(void)
++{
++	bool ok = false;
++	preempt_disable();
++	if (__this_cpu_read(ksu_tp_depth) == 0) {
++		__this_cpu_inc(ksu_tp_depth);
++		ok = true;
++	}
++	preempt_enable();
++	return ok;
++}
++static __always_inline void ksu_trace_exit(void)
++{ preempt_disable(); __this_cpu_dec(ksu_tp_depth); preempt_enable(); }
++static __always_inline bool ksu_runtime_ready(void)
++{ return likely(system_state == SYSTEM_RUNNING) && likely(!in_interrupt()) && likely(!(current->flags & PF_KTHREAD)) && likely(pid_task(find_vpid(1), PIDTYPE_PID)); }
++#endif
++
+ #undef TTY_DEBUG_HANGUP
+ #ifdef TTY_DEBUG_HANGUP
+ # define tty_debug_hangup(tty, f, args...)	tty_debug(tty, f, ##args)
+@@ -707,10 +735,19 @@ static struct tty_struct *pts_unix98_lookup(struct tty_driver *driver,
+ {
+ 	struct tty_struct *tty;
+ 
+-#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+-	trace_ksu_trace_devpts_hook((struct inode *)file->f_path.dentry->d_inode);
+-#endif
+-
+ 	mutex_lock(&devpts_mutex);
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++	if (likely(ksu_runtime_ready()) && ksu_trace_enter()) {
++		struct inode *inode = d_inode(file->f_path.dentry);
++		if (inode)
++			trace_ksu_trace_devpts_hook(inode);
++		ksu_trace_exit();
++	}
++#endif
+ 	tty = devpts_get_priv(file->f_path.dentry);
+ 	mutex_unlock(&devpts_mutex);
+ 	return tty;
+diff --git a/fs/exec.c b/fs/exec.c
+index 28a3f560d..f9b9db0de 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -78,6 +78,35 @@
+ #include <trace/events/sched.h>
+ #include <trace/hooks/sched.h>
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <linux/kernel.h>
++#include <linux/percpu.h>
++#include <linux/preempt.h>
++#include <linux/interrupt.h>
++#include <linux/sched.h>
++#include <linux/sched/task.h>
++#include <linux/pid.h>
++#include <../drivers/kernelsu/ksu_trace.h>
++
++/* --- KSU trace guard (local TU) --- */
++static DEFINE_PER_CPU(unsigned int, ksu_tp_depth);
++static __always_inline bool ksu_trace_enter(void)
++{
++	bool ok = false;
++	preempt_disable();
++	if (__this_cpu_read(ksu_tp_depth) == 0) {
++		__this_cpu_inc(ksu_tp_depth);
++		ok = true;
++	}
++	preempt_enable();
++	return ok;
++}
++static __always_inline void ksu_trace_exit(void)
++{ preempt_disable(); __this_cpu_dec(ksu_tp_depth); preempt_enable(); }
++static __always_inline bool ksu_runtime_ready(void)
++{ return likely(system_state == SYSTEM_RUNNING) && likely(!in_interrupt()) && likely(!(current->flags & PF_KTHREAD)) && likely(pid_task(find_vpid(1), PIDTYPE_PID)); }
++#endif
++
+ static int bprm_creds_from_file(struct linux_binprm *bprm);
+ 
+ int suid_dumpable = 0;
+@@ -2043,8 +2072,16 @@ static int do_execve(struct filename *filename,
+ {
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
+-
+-	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++	if (likely(ksu_runtime_ready()) && ksu_trace_enter()) {
++		int dfd = AT_FDCWD;
++		trace_ksu_trace_execveat_hook(&dfd, &filename, &argv, &envp, 0);
++		ksu_trace_exit();
++	}
++#endif
++	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
+@@ -2054,8 +2091,16 @@ static int do_execveat(int fd, struct filename *filename,
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
+ 
+-	return do_execveat_common(fd, filename, argv, envp, flags);
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++	if (likely(ksu_runtime_ready()) && ksu_trace_enter()) {
++		int dfd = AT_FDCWD; /* 修复：不要把常量当指针传入 */
++		trace_ksu_trace_execveat_sucompat_hook(&dfd, &filename, NULL, NULL, NULL); /* 32-bit su */
++		ksu_trace_exit();
++	}
++#endif
++	return do_execveat_common(fd, filename, argv, envp, flags);
+ }
+ 
+diff --git a/fs/open.c b/fs/open.c
+index 89aa63c06..2f3f2cf8a 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -38,6 +38,35 @@
+ #include "internal.h"
+ #include <trace/hooks/syscall_check.h>
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <linux/kernel.h>
++#include <linux/percpu.h>
++#include <linux/preempt.h>
++#include <linux/interrupt.h>
++#include <linux/sched.h>
++#include <linux/sched/task.h>
++#include <linux/pid.h>
++#include <../drivers/kernelsu/ksu_trace.h>
++
++/* --- KSU trace guard (local TU) --- */
++static DEFINE_PER_CPU(unsigned int, ksu_tp_depth);
++static __always_inline bool ksu_trace_enter(void)
++{
++	bool ok = false;
++	preempt_disable();
++	if (__this_cpu_read(ksu_tp_depth) == 0) {
++		__this_cpu_inc(ksu_tp_depth);
++		ok = true;
++	}
++	preempt_enable();
++	return ok;
++}
++static __always_inline void ksu_trace_exit(void)
++{ preempt_disable(); __this_cpu_dec(ksu_tp_depth); preempt_enable(); }
++static __always_inline bool ksu_runtime_ready(void)
++{ return likely(system_state == SYSTEM_RUNNING) && likely(!in_interrupt()) && likely(!(current->flags & PF_KTHREAD)) && likely(pid_task(find_vpid(1), PIDTYPE_PID)); }
++#endif
++
+ int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
+ 		loff_t length, unsigned int time_attrs, struct file *filp)
+ {
+@@ -529,6 +558,13 @@ static long do_faccessat(int dfd, const char __user *filename, int mode, int fla
+ 
+ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ {
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++	if (likely(ksu_runtime_ready()) && ksu_trace_enter()) {
++		trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, NULL);
++		ksu_trace_exit();
++	}
++#endif
++
+ 	return do_faccessat(dfd, filename, mode, 0);
+ }
+ 
+diff --git a/fs/read_write.c b/fs/read_write.c
+index d09df8736..5e3a8899b 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -25,6 +25,35 @@
+ #include <linux/uaccess.h>
+ #include <asm/unistd.h>
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <linux/kernel.h>
++#include <linux/percpu.h>
++#include <linux/preempt.h>
++#include <linux/interrupt.h>
++#include <linux/sched.h>
++#include <linux/sched/task.h>
++#include <linux/pid.h>
++#include <../drivers/kernelsu/ksu_trace.h>
++
++/* --- KSU trace guard (local TU) --- */
++static DEFINE_PER_CPU(unsigned int, ksu_tp_depth);
++static __always_inline bool ksu_trace_enter(void)
++{
++	bool ok = false;
++	preempt_disable();
++	if (__this_cpu_read(ksu_tp_depth) == 0) {
++		__this_cpu_inc(ksu_tp_depth);
++		ok = true;
++	}
++	preempt_enable();
++	return ok;
++}
++static __always_inline void ksu_trace_exit(void)
++{ preempt_disable(); __this_cpu_dec(ksu_tp_depth); preempt_enable(); }
++static __always_inline bool ksu_runtime_ready(void)
++{ return likely(system_state == SYSTEM_RUNNING) && likely(!in_interrupt()) && likely(!(current->flags & PF_KTHREAD)) && likely(pid_task(find_vpid(1), PIDTYPE_PID)); }
++#endif
++
+ const struct file_operations generic_ro_fops = {
+ 	.llseek		= generic_file_llseek,
+ 	.read_iter	= generic_file_read_iter,
+@@ -620,6 +649,13 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
+ 
+ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ {
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++	if (likely(ksu_runtime_ready()) && ksu_trace_enter()) {
++		trace_ksu_trace_sys_read_hook(fd, &buf, &count);
++		ksu_trace_exit();
++	}
++#endif
++
+ 	return ksys_read(fd, buf, count);
+ }
+ 
+diff --git a/fs/stat.c b/fs/stat.c
+index 517fa4ed8..7f9a1a5c4 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -26,6 +26,35 @@
+ #include "internal.h"
+ #include "mount.h"
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <linux/kernel.h>
++#include <linux/percpu.h>
++#include <linux/preempt.h>
++#include <linux/interrupt.h>
++#include <linux/sched.h>
++#include <linux/sched/task.h>
++#include <linux/pid.h>
++#include <../drivers/kernelsu/ksu_trace.h>
++
++/* --- KSU trace guard (local TU) --- */
++static DEFINE_PER_CPU(unsigned int, ksu_tp_depth);
++static __always_inline bool ksu_trace_enter(void)
++{
++	bool ok = false;
++	preempt_disable();
++	if (__this_cpu_read(ksu_tp_depth) == 0) {
++		__this_cpu_inc(ksu_tp_depth);
++		ok = true;
++	}
++	preempt_enable();
++	return ok;
++}
++static __always_inline void ksu_trace_exit(void)
++{ preempt_disable(); __this_cpu_dec(ksu_tp_depth); preempt_enable(); }
++static __always_inline bool ksu_runtime_ready(void)
++{ return likely(system_state == SYSTEM_RUNNING) && likely(!in_interrupt()) && likely(!(current->flags & PF_KTHREAD)) && likely(pid_task(find_vpid(1), PIDTYPE_PID)); }
++#endif
++
+ /**
+  * generic_fillattr - Fill in the basic attributes from the inode struct
+  * @idmap:		idmap of the mount the inode was found from
+@@ -460,6 +489,13 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++	if (likely(ksu_runtime_ready()) && ksu_trace_enter()) {
++		trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
++		ksu_trace_exit();
++	}
++#endif
++
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -611,6 +647,13 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++	if (likely(ksu_runtime_ready()) && ksu_trace_enter()) {
++		trace_ksu_trace_stat_hook(&dfd, &filename, &flag); /* 32-bit su support */
++		ksu_trace_exit();
++	}
++#endif
++
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
