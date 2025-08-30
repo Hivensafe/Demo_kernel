@@ -331,10 +331,35 @@ jobs:
           #     sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
           # fi
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/fix_tracepoint_hooks.patch" ./
-          patch -p1 -F 3 < fix_tracepoint_hooks.patch
+          # === 规范化并应用 fix_tracepoint_hooks.patch ===
+          # 1) 拷贝
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/fix_tracepoint_hooks.patch" ./ || {
+            echo "[warn] fix_tracepoint_hooks.patch not found"; exit 0; }
           
-          echo "完成"
+          # 2) 去除 UTF-8 BOM（如果有）+ 转换为 LF 行尾
+          #    （在 actions/ubuntu 环境里可直接用 sed；没有 dos2unix 也没关系）
+          #    删除 BOM
+          (printf 'x' | tail -c +2 fix_tracepoint_hooks.patch >/dev/null 2>&1) || true  # 预热避免 set -e 退出
+          # 真正去 BOM
+          BOM_HEX=$(head -c3 fix_tracepoint_hooks.patch | hexdump -v -e '/1 "%02x"'); 
+          if [ "$BOM_HEX" = "efbbbf" ]; then
+            tail -c +4 fix_tracepoint_hooks.patch > .fix.tmp && mv .fix.tmp fix_tracepoint_hooks.patch
+          fi
+          # 去掉 CR (\r)
+          sed -i 's/\r$//' fix_tracepoint_hooks.patch
+          
+          # 3) 预检：如果是 git 风格补丁，优先用 git apply；否则用 patch
+          if git apply --check -p1 fix_tracepoint_hooks.patch 2>/dev/null; then
+            echo "[info] applying via git apply (with 3-way fallback)…"
+            git apply -p1 --3way --whitespace=nowarn fix_tracepoint_hooks.patch || {
+              echo "[warn] git 3-way failed; falling back to patch -F3"
+              patch -p1 -F 3 < fix_tracepoint_hooks.patch
+            }
+          else
+            echo "[info] applying via patch -F3 (tolerant fuzz)…"
+            patch -p1 -F 3 < fix_tracepoint_hooks.patch
+          fi
+
 
 
       - name: 🔧 Cache HMBird patch (缓存HMBird补丁)
