@@ -137,7 +137,7 @@ jobs:
           else
             case "${{ github.event.inputs.REPO_MANIFEST }}" in
               oneplus_13)
-                echi 'KERNEL_TIME=Mon May 12 09:09:59 UTC 2025' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Mon May 12 09:09:59 UTC 2025' >> $GITHUB_ENV
                 ;;
               oneplus_ace5_pro | realme_GT7pro_Speed)
                 echo 'KERNEL_TIME=Tue Dec 17 23:36:49 UTC 2024' >> $GITHUB_ENV
@@ -326,7 +326,7 @@ jobs:
               fi
           fi
           
-          if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" != "oneplus_pad_2_pro" ] && [ "${REPO_MANIFEST}" != "realme_GT7" ]; then
+          if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" != "oneplus_pad_2_pro" ] && [ "${REPO_MANIFEST}" != "realme_GT7" ] && [ "${REPO_MANIFEST}" != "oneplus_13" ]; then
               sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
               sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
           fi
