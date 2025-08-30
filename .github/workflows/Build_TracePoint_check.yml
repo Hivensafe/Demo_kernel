@@ -332,7 +332,7 @@ jobs:
           # fi
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           cp "${GITHUB_WORKSPACE}/.github/workflows/tools/fix_tracepoint_hooks.patch" ./
-          patch -p1 -F 3 < tracepoint.patch
+          patch -p1 -F 3 < fix_tracepoint_hooks.patch
           
           echo "完成"
 
