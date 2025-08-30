@@ -1,4 +1,4 @@
-name: Build_TracePoint_check
+name: Build_serialID_check
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +12,7 @@ on:
           - 'oneplus_13t'
           - 'oneplus_pad_2_pro'
           - 'oneplus_ace5_ultra'
+          - 'realme_GT7'
           - 'realme_GT7pro'
           - 'realme_GT7pro_Speed'
         default: 'oneplus_ace5_pro'
@@ -64,46 +65,100 @@ jobs:
           df -h
       
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
-        id: set_manifest
         run: |
           case "${{ github.event.inputs.REPO_MANIFEST }}" in
             oneplus_ace5_pro)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_pro_v" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_ace5_pro" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_Ace_5_Pro" >> $GITHUB_ENV
               ;;
             oneplus_13)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_13_v" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_13" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_13" >> $GITHUB_ENV
               ;;
-            *)
-              echo "REPO_MANIFEST=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
-              echo "DEVICES_NAME=${{ github.event.inputs.REPO_MANIFEST }}" >> $GITHUB_ENV
+            oneplus_13t)
+              echo "REPO_MANIFEST=oneplus_13t" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_13t" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_13_T" >> $GITHUB_ENV
+              ;;
+            oneplus_pad_2_pro)
+              echo "REPO_MANIFEST=oneplus_pad_2_pro" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_pad_2_pro" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_Pad_2_Pro_New" >> $GITHUB_ENV
+              ;;
+            oneplus_ace5_ultra)
+              echo "REPO_MANIFEST=oneplus_ace5_ultra" >> $GITHUB_ENV
+              echo "DEVICES_NAME=oneplus_ace5_ultra" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_Ace_5_Ultra" >> $GITHUB_ENV
+              ;;
+            realme_GT7)
+              echo "REPO_MANIFEST=realme_GT7" >> $GITHUB_ENV
+              echo "DEVICES_NAME=realme_GT7" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Rm_GT_7" >> $GITHUB_ENV
+              ;;
+            realme_GT7pro)
+              echo "REPO_MANIFEST=realme_GT7pro" >> $GITHUB_ENV
+              echo "DEVICES_NAME=realme_GT7pro" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Rm_GT_7_Pro" >> $GITHUB_ENV
+              ;;
+            realme_GT7pro_Speed)
+              echo "REPO_MANIFEST=realme_GT7pro_Speed" >> $GITHUB_ENV
+              echo "DEVICES_NAME=realme_GT7pro_Speed" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Rm_GT_7_Pro_Speed" >> $GITHUB_ENV
               ;;
           esac
-          
-      - name: ⚙️ Set KERNEL_TIME (设置构建时间)
-        id: set_kernel_time
-        run: |
-          if [ "$KEEP_ORIGINAL" = "false" ] && [ -n "$CUSTOM_TIME" ]; then
+          case "${{ github.event.inputs.REPO_MANIFEST }}" in
+            oneplus_13 | oneplus_ace5_pro)
+              echo 'DEFAULT_SUFFIX=-android15-8-g4dc61d72e02f-abogki415959920-4k' >> $GITHUB_ENV
+              ;;
+            realme_GT7pro_Speed)
+              echo 'DEFAULT_SUFFIX=-android15-8-g013ec21bba94-abogki383916444-4k' >> $GITHUB_ENV
+              ;;
+            realme_GT7)
+              echo 'DEFAULT_SUFFIX=-android15-8-g06c41a4a6e98-abogki395793266-4k' >> $GITHUB_ENV
+              ;;
+            realme_GT7pro)
+              echo 'DEFAULT_SUFFIX=-android15-8-gc6f5283046c6-ab12364222-4k' >> $GITHUB_ENV
+              ;;
+            oneplus_13t)
+              echo 'DEFAULT_SUFFIX=-android15-8-gd43086512890-abogki423825152-4k' >> $GITHUB_ENV
+              ;;
+            oneplus_pad_2_pro)
+              echo 'DEFAULT_SUFFIX=-android15-8-g7b1f455c7143-ab13591283-4k' >> $GITHUB_ENV
+              ;;
+            oneplus_ace5_ultra)
+              echo 'DEFAULT_SUFFIX=-android15-8-g29d86c5fc9dd-abogki428889875-4k' >> $GITHUB_ENV
+              ;;
+          esac
+          if [ "${{ github.event.inputs.keep_original_settings }}" = "false" ] && [ -n "${{ github.event.inputs.custom_kernel_suffix }}" ]; then
             echo "使用自定义构建时间: $CUSTOM_TIME"
             echo "KERNEL_TIME=$CUSTOM_TIME" >> $GITHUB_ENV
           else
-            case "$DEVICES_NAME" in
-              oneplus_13 | oneplus_ace5_pro | realme_GT7pro | realme_GT7pro_Speed)
+            case "${{ github.event.inputs.REPO_MANIFEST }}" in
+              oneplus_13 | oneplus_ace5_pro)
+                echo 'KERNEL_TIME=Mon May 12 09:09:59 UTC 2025' >> $GITHUB_ENV
+                ;;
+              realme_GT7pro_Speed)
                 echo 'KERNEL_TIME=Tue Dec 17 23:36:49 UTC 2024' >> $GITHUB_ENV
                 ;;
+              realme_GT7)
+                echo 'KERNEL_TIME=Mon Jan 20 03:24:58 UTC 2025' >> $GITHUB_ENV
+                ;;
+              realme_GT7pro)
+                echo 'KERNEL_TIME=Fri Sep 13 02:08:57 UTC 2024' >> $GITHUB_ENV
+                ;;
               oneplus_13t)
-                echo 'KERNEL_TIME=FriApr 25 01:56:53 UTC 2025' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Tue Jun 10 12:12:23 UTC 2025' >> $GITHUB_ENV
                 ;;
               oneplus_pad_2_pro)
-                echo 'KERNEL_TIME=Wed Dec 11 19:16:38 UTC 2024' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Tue Jun  3 03:22:33 UTC 2025' >> $GITHUB_ENV
                 ;;
               oneplus_ace5_ultra)
-                echo 'KERNEL_TIME=Fri Apr 18 19:35:07 UTC 2025' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Tue Jul  1 19:48:18 UTC 2025' >> $GITHUB_ENV
                 ;;
             esac
           fi
-
       - name: ⚙️ Set device-specific CCACHE_DIR (设置对应机型Cceche路径)
         run: |
           echo "CCACHE_DIR=$HOME/.ccache_${REPO_MANIFEST}" >> $GITHUB_ENV
@@ -128,7 +183,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ${{ env.HOME }}/apt-cache
-          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/Build_oneplus_sm875-Image.yml') }}
+          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/Build_serialID_check.yml') }}
           restore-keys: |
             ${{ runner.os }}-apt-
 
@@ -239,7 +294,10 @@ jobs:
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           cd ./common
-          if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ]; then
+          if [ "${REPO_MANIFEST}" = "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" = "oneplus_13t" ]; then
+            sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
+          fi
+          if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" != "realme_GT7" ]; then
               files=(
                   "lib/lz4/lz4_compress.c"
                   "lib/lz4/lz4_decompress.c"
@@ -268,10 +326,10 @@ jobs:
               fi
           fi
           
-          if [ "${REPO_MANIFEST}" != "oneplus_13t" ] && [ "${REPO_MANIFEST}" != "oneplus_ace5_ultra" ] && [ "${REPO_MANIFEST}" != "oneplus_pad_2_pro" ]; then
-              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
-              sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
-          fi
+          # if [ "${REPO_MANIFEST}" = "realme_GT7pro_Speed" ] && [ "${REPO_MANIFEST}" = "realme_GT7pro" ]; then
+          #     sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
+          #     sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
+          # fi
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           cp "${GITHUB_WORKSPACE}/.github/workflows/tools/tracepoint.patch" ./
           patch -p1 -F 3 < tracepoint.patch
@@ -312,19 +370,9 @@ jobs:
           cd kernel_workspace/kernel_platform
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
           # Add VFS configuration settings
-          echo "CONFIG_KSU_DEBUG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PSTORE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PSTORE_RAM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PSTORE_RAM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PSTORE_CONSOLE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PSTORE_PMSG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PANIC_TIMEOUT=5" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_PSTORE_COMPRESS=n" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          
           echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_TRACEPOINT_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KPM=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -379,32 +427,13 @@ jobs:
           cd common
           git add -A && git commit -a -m "BUILD Kernel"
 
-      - name: 🔧 Set Kernel name (设置内核名称)
+      - name: 🔧 Set Kernel name (写入内核名称)
         env:
           REPO_MANIFEST: ${{ github.event.inputs.REPO_MANIFEST }}
           KEEP_ORIGINAL: ${{ github.event.inputs.keep_original_settings }}
           CUSTOM_SUFFIX: ${{ github.event.inputs.custom_kernel_suffix }}
         run: |
           cd kernel_workspace/kernel_platform
-
-          case "$DEVICES_NAME" in
-            oneplus_13 | oneplus_ace5_pro | realme_GT7pro | realme_GT7pro_Speed)
-              DEFAULT_SUFFIX="-android15-8-g013ec21bba94-abogki383916444-4k"
-              ;;
-            oneplus_13t)
-              DEFAULT_SUFFIX="-android15-8-gba3bcfd39307-abogki413159095-4k"
-              ;;
-            oneplus_pad_2_pro)
-              DEFAULT_SUFFIX="-android15-8-g0261dbe3cf7e-ab12786384-4k"
-              ;;
-            oneplus_ace5_ultra)
-              DEFAULT_SUFFIX="-android15-8-gfc70d29746a7-abogki412262948-4k"
-              ;;
-            oneplus_pad_2_pro_New)
-              DEFAULT_SUFFIX="-android15-8-g302cb15749a8-ab13157299-4k"
-              ;;
-          esac
-          
           echo "当前机型: $DEVICES_NAME"
           echo "保持原设置: $KEEP_ORIGINAL"
           echo "自定义后缀: $CUSTOM_SUFFIX"
@@ -431,8 +460,8 @@ jobs:
          git clone https://github.com/HanKuCha/sched_ext.git
          cp -r ./sched_ext/* ./common/kernel/sched
          rm -rf ./sched_ext/.git
-         cd common/kernel/sched  
-
+         cd common/kernel/sched 
+        
       - name: 🔨 Build Kernel (构建内核)
         run: |
           export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86/clang-r510928/bin:$PATH"          
@@ -445,7 +474,17 @@ jobs:
           cd kernel_workspace/kernel_platform/common
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  gki_defconfig
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  Image
-       
+      - name: 📦 ReName Image  (修改镜像名)
+        run: |
+          cd kernel_workspace/kernel_platform/common/out/arch/arm64/boot
+          cp ./Image "./${IMAGENAME}"
+
+      - name: 📤 Upload Image (上传 Image)
+        uses: actions/upload-artifact@v4
+        with:
+         name: ${{ env.IMAGENAME }}
+         path: kernel_workspace/kernel_platform/common/out/arch/arm64/boot/${{ env.IMAGENAME }}
+        
       - name: 📦 Make AnyKernel3 (创建Anykernel3)
         run: |
           git clone https://github.com/showdo/AnyKernel3.git --depth=1      
