@@ -70,7 +70,7 @@ jobs:
             oneplus_ace5_pro)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_pro_v" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_ace5_pro" >> $GITHUB_ENV
-              echo "IMAGENAME=Image_Op_Ace_5" >> $GITHUB_ENV
+              echo "IMAGENAME=Image_Op_Ace_5_Pro" >> $GITHUB_ENV
               ;;
             oneplus_13)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_13_v" >> $GITHUB_ENV
