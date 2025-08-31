@@ -23,13 +23,7 @@ index 000000000000..111111111111
 +	return static_branch_unlikely(&ksu_tp_key);
 +}
 +
-+/* Only run in very safe contexts:
-+ * - system fully running
-+ * - not in interrupt / softirq
-+ * - not in kthread
-+ * - not in atomic/preempt-disabled section
-+ * - init(1) exists (proc ready)
-+ */
++/* only run in very safe contexts */
 +static __always_inline bool ksu_safe_context(void)
 +{
 +	if (unlikely(system_state != SYSTEM_RUNNING))
@@ -65,7 +59,7 @@ index 000000000000..111111111111
 +	preempt_enable();
 +}
 +
-+/* One-liner to guard a trace call */
++/* one-liner */
 +#define KSU_TRACE_SAFE_CALL(_call)                                      \
 +	do {                                                                \
 +		if (ksu_tp_on() && ksu_safe_context() && ksu_trace_enter()) {   \
@@ -142,24 +136,17 @@ index 000000000000..222222222222
 +}
 +late_initcall(ksu_trace_toggle_init);
 diff --git a/drivers/kernelsu/Makefile b/drivers/kernelsu/Makefile
-index abcdef012345..789abcdeffff 100644
+index 4b7c7b4b7b7b..8c8c8c8c8c8c 100644
 --- a/drivers/kernelsu/Makefile
 +++ b/drivers/kernelsu/Makefile
-@@ -1,3 +1,4 @@
-+## (context from your provided Makefile)
- kernelsu-objs := ksu.o
- kernelsu-objs += allowlist.o
- kernelsu-objs += dynamic_manager.o
-@@ -18,6 +19,9 @@ ifeq ($(CONFIG_KSU_TRACEPOINT_HOOK), y)
+@@ -16,6 +16,8 @@ ifeq ($(CONFIG_KSU_TRACEPOINT_HOOK), y)
  kernelsu-objs += ksu_trace.o
  endif
  
 +# runtime toggle for trace hooks (default OFF)
 +obj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_trace_toggle.o
-+
- kernelsu-objs += selinux/selinux.o
- kernelsu-objs += selinux/sepolicy.o
- kernelsu-objs += selinux/rules.o
+ obj-$(CONFIG_KSU) += kernelsu.o
+ obj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_trace_export.o
 diff --git a/drivers/input/input.c b/drivers/input/input.c
 index 8c5fdb0f8..d4c1cceb3 100644
 --- a/drivers/input/input.c
@@ -168,12 +155,10 @@ index 8c5fdb0f8..d4c1cceb3 100644
  #include "input-core-private.h"
  #include "input-poller.h"
  
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--#include <../../drivers/kernelsu/ksu_trace.h>
-+#include <../../drivers/kernelsu/ksu_trace.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../../drivers/kernelsu/ksu_trace_export.h>
 +#include <../../drivers/kernelsu/ksu_trace_guard.h>
- #endif
- 
++#endif
  MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
  MODULE_DESCRIPTION("Input core");
  MODULE_LICENSE("GPL");
@@ -181,13 +166,13 @@ index 8c5fdb0f8..d4c1cceb3 100644
  {
  	unsigned long flags;
  
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--    trace_ksu_trace_input_hook(&type, &code, &value);
-+	/* input_event 可能处于原子/中断上下文，统一经过安全宏（默认不开） */
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
 +	KSU_TRACE_SAFE_CALL(trace_ksu_trace_input_hook(&type, &code, &value));
- #endif
- 
++#endif
++
  	if (is_event_supported(type, dev->evbit, EV_MAX)) {
+ 
+ 		spin_lock_irqsave(&dev->event_lock, flags);
 diff --git a/drivers/tty/pty.c b/drivers/tty/pty.c
 index df08f1305..753eb7bbf 100644
 --- a/drivers/tty/pty.c
@@ -196,14 +181,13 @@ index df08f1305..753eb7bbf 100644
  #include <linux/compat.h>
  #include "tty.h"
  
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--#include <../../drivers/kernelsu/ksu_trace.h>
-+#include <../../drivers/kernelsu/ksu_trace.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../../drivers/kernelsu/ksu_trace_export.h>
 +#include <../../drivers/kernelsu/ksu_trace_guard.h>
- #endif
- 
++#endif
  #undef TTY_DEBUG_HANGUP
  #ifdef TTY_DEBUG_HANGUP
+ # define tty_debug_hangup(tty, f, args...)	tty_debug(tty, f, ##args)
 @@ -707,6 +711,14 @@ static struct tty_struct *pts_unix98_lookup(struct tty_driver *driver,
  {
  	struct tty_struct *tty;
@@ -214,7 +198,6 @@ index df08f1305..753eb7bbf 100644
 -
  	mutex_lock(&devpts_mutex);
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-+	/* 放到加锁后，并通过安全宏执行（默认不开） */
 +	KSU_TRACE_SAFE_CALL({
 +		struct inode *inode = d_inode(file->f_path.dentry);
 +		if (inode)
@@ -232,41 +215,40 @@ index 28a3f560d..f263a260b 100644
  #include <trace/events/sched.h>
  #include <trace/hooks/sched.h>
  
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--#include <../drivers/kernelsu/ksu_trace.h>
-+#include <../drivers/kernelsu/ksu_trace.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../drivers/kernelsu/ksu_trace_export.h>
 +#include <../drivers/kernelsu/ksu_trace_guard.h>
- #endif
- 
++#endif
  static int bprm_creds_from_file(struct linux_binprm *bprm);
+ 
+ int suid_dumpable = 0;
 @@ -2043,6 +2047,13 @@ static int do_execve(struct filename *filename,
  {
  	struct user_arg_ptr argv = { .ptr.native = __argv };
  	struct user_arg_ptr envp = { .ptr.native = __envp };
 +
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--    trace_ksu_trace_execveat_hook((int *)AT_FDCWD, &filename, &argv, &envp, 0);
-+	/* 修正参数 + 安全宏 */
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
 +	KSU_TRACE_SAFE_CALL({
 +		int dfd = AT_FDCWD;
 +		trace_ksu_trace_execveat_hook(&dfd, &filename, &argv, &envp, 0);
 +	});
- #endif
++#endif
  	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
  }
+ 
 @@ -2054,6 +2065,13 @@ static int do_execveat(int fd, struct filename *filename,
  	struct user_arg_ptr argv = { .ptr.native = __argv };
  	struct user_arg_ptr envp = { .ptr.native = __envp };
  
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--    trace_ksu_trace_execveat_sucompat_hook((int *)AT_FDCWD, &filename, NULL, NULL, NULL); /* 32-bit su */
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
 +	KSU_TRACE_SAFE_CALL({
-+		int dfd = AT_FDCWD; /* 不要把常量当指针传入 */
++		int dfd = AT_FDCWD;
 +		trace_ksu_trace_execveat_sucompat_hook(&dfd, &filename, NULL, NULL, NULL); /* 32-bit su */
 +	});
- #endif
++#endif
  	return do_execveat_common(fd, filename, argv, envp, flags);
  }
+ 
 diff --git a/fs/open.c b/fs/open.c
 index 89aa63c06..166624ed8 100644
 --- a/fs/open.c
@@ -275,23 +257,21 @@ index 89aa63c06..166624ed8 100644
  #include "internal.h"
  #include <trace/hooks/syscall_check.h>
  
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--#include <../drivers/kernelsu/ksu_trace.h>
-+#include <../drivers/kernelsu/ksu_trace.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../drivers/kernelsu/ksu_trace_export.h>
 +#include <../drivers/kernelsu/ksu_trace_guard.h>
- #endif
- 
++#endif
  int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
  		loff_t length, unsigned int time_attrs, struct file *filp)
+ {
 @@ -529,6 +533,11 @@ static long do_faccessat(int dfd, const char __user *filename, int mode, int fla
  
  SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
  {
 +
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--	trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, NULL);
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
 +	KSU_TRACE_SAFE_CALL(trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, NULL));
- #endif
++#endif
 +
  	return do_faccessat(dfd, filename, mode, 0);
  }
@@ -304,23 +284,21 @@ index d09df8736..21a040d4e 100644
  #include <linux/uaccess.h>
  #include <asm/unistd.h>
  
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--#include <../drivers/kernelsu/ksu_trace.h>
-+#include <../drivers/kernelsu/ksu_trace.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../drivers/kernelsu/ksu_trace_export.h>
 +#include <../drivers/kernelsu/ksu_trace_guard.h>
- #endif
- 
++#endif
  const struct file_operations generic_ro_fops = {
  	.llseek		= generic_file_llseek,
+ 	.read_iter	= generic_file_read_iter,
 @@ -620,6 +624,11 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
  
  SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
  {
 +
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--    trace_ksu_trace_sys_read_hook(fd, &buf, &count);
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
 +	KSU_TRACE_SAFE_CALL(trace_ksu_trace_sys_read_hook(fd, &buf, &count));
- #endif
++#endif
 +
  	return ksys_read(fd, buf, count);
  }
@@ -333,23 +311,21 @@ index 517fa4ed8..54db252aa 100644
  #include "internal.h"
  #include "mount.h"
  
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--#include <../drivers/kernelsu/ksu_trace.h>
-+#include <../drivers/kernelsu/ksu_trace.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../drivers/kernelsu/ksu_trace_export.h>
 +#include <../drivers/kernelsu/ksu_trace_guard.h>
- #endif
- 
++#endif
  /**
   * generic_fillattr - Fill in the basic attributes from the inode struct
+  * @idmap:		idmap of the mount the inode was found from
 @@ -460,6 +464,11 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
  	struct kstat stat;
  	int error;
  
 +
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--	trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
 +	KSU_TRACE_SAFE_CALL(trace_ksu_trace_stat_hook(&dfd, &filename, &flag));
- #endif
++#endif
 +
  	error = vfs_fstatat(dfd, filename, &stat, flag);
  	if (error)
@@ -359,10 +335,9 @@ index 517fa4ed8..54db252aa 100644
  	int error;
  
 +
- #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
--	trace_ksu_trace_stat_hook(&dfd, &filename, &flag); /* 32-bit su support */
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
 +	KSU_TRACE_SAFE_CALL(trace_ksu_trace_stat_hook(&dfd, &filename, &flag)); /* 32-bit su support */
- #endif
++#endif
 +
  	error = vfs_fstatat(dfd, filename, &stat, flag);
  	if (error)
