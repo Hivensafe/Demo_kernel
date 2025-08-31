@@ -329,9 +329,12 @@ jobs:
           
           # SUSFS 主补丁
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-          # 你已位于 kernel_workspace/kernel_platform/common
+          set -euo pipefail
+          # 工作目录必须是：kernel_workspace/kernel_platform/common
           
-          # 1) 写入新文件：drivers/kernelsu/ksu_trace_guard.h
+          ########################################
+          # 1) 新增/覆盖：drivers/kernelsu/ksu_trace_guard.h
+          ########################################
           mkdir -p drivers/kernelsu
           cat > drivers/kernelsu/ksu_trace_guard.h << 'EOF'
           /* SPDX-License-Identifier: GPL-2.0 */
@@ -352,7 +355,7 @@ jobs:
           	return static_branch_unlikely(&ksu_tp_key);
           }
           
-          /* Safe runtime context only */
+          /* Only run in safe contexts to avoid early-boot / atomic / recursion panics. */
           static __always_inline bool ksu_safe_context(void)
           {
           	if (unlikely(system_state != SYSTEM_RUNNING))
@@ -363,12 +366,12 @@ jobs:
           		return false;
           	if (unlikely(preempt_count()))
           		return false;
-          	if (unlikely(!pid_task(find_vpid(1), PIDTYPE_PID)))
+          	if (unlikely(!pid_task(find_vpid(1), PIDTYPE_PID))) /* init(1) present */
           		return false;
           	return true;
           }
           
-          /* per-cpu, per-task reentrancy guard */
+          /* per-cpu reentrancy guard */
           static __always_inline bool ksu_trace_enter(void)
           {
           	bool ok = false;
@@ -388,7 +391,7 @@ jobs:
           	preempt_enable();
           }
           
-          /* One-liner to guard a trace call */
+          /* one-liner wrapper */
           #define KSU_TRACE_SAFE_CALL(_call)                                      \
           	do {                                                                \
           		if (ksu_tp_on() && ksu_safe_context() && ksu_trace_enter()) {   \
@@ -398,7 +401,9 @@ jobs:
           	} while (0)
           EOF
           
-          # 2) 写入新文件：drivers/kernelsu/ksu_trace_toggle.c
+          ########################################
+          # 2) 新增/覆盖：drivers/kernelsu/ksu_trace_toggle.c  (debugfs 开关，默认关闭)
+          ########################################
           cat > drivers/kernelsu/ksu_trace_toggle.c << 'EOF'
           // SPDX-License-Identifier: GPL-2.0
           #include <linux/init.h>
@@ -464,75 +469,61 @@ jobs:
           late_initcall(ksu_trace_toggle_init);
           EOF
           
-          # 3) Makefile：加入 ksu_trace_toggle.o（若未加）
+          ########################################
+          # 3) Makefile 追加 ksu_trace_toggle.o（若未追加）
+          ########################################
           mf="drivers/kernelsu/Makefile"
-          if ! grep -q 'ksu_trace_toggle\.o' "$mf"; then
-            printf '\n# runtime toggle for KSU trace hooks\nobj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_trace_toggle.o\n' >> "$mf"
+          if [ -f "$mf" ] && ! grep -q 'ksu_trace_toggle\.o' "$mf"; then
+            printf '\n# runtime toggle for trace hooks (default OFF)\nobj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_trace_toggle.o\n' >> "$mf"
           fi
           
-          # 4) 需要改动的源文件清单（相对 common/）
-          files=(
-            "drivers/input/input.c"
-            "drivers/tty/pty.c"
-            "fs/exec.c"
-            "fs/open.c"
-            "fs/read_write.c"
-            "fs/stat.c"
-          )
-          
-          # 5) 在包含了 ksu_trace.h 的地方附加 guard 头；若没包含也尽量插入
-          for f in "${files[@]}"; do
-            [ -f "$f" ] || continue
-            if grep -q 'ksu_trace.h' "$f"; then
-              if ! grep -q 'ksu_trace_guard.h' "$f"; then
-                # 在包含 ksu_trace.h 的下一行插入 guard
-                awk '{
-                  print $0;
-                  if ($0 ~ /ksu_trace\.h/ && inserted!=1) { print "#include <../../drivers/kernelsu/ksu_trace_guard.h>"; inserted=1 }
-                }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-              fi
+          ########################################
+          # 4) 在 6 个调用点文件中，引入 export + guard 头（避免 TRACE_INCLUDE_* 宏冲突）
+          ########################################
+          add_inc() {
+            local f="$1" up="$2"  # up: 相对层级("../" 或 "../../")
+            [ -f "$f" ] || return 0
+            # 清理旧的包含，防止重复
+            sed -i '/ksu_trace_guard\.h/d;/ksu_trace_export\.h/d;/ksu_trace\.h/d' "$f"
+            # 在最后一个 #include 之后附加（找不到就直接插到文件头）
+            if grep -q '^#include' "$f"; then
+              awk -vinc1="#include <'"$up"'drivers/kernelsu/ksu_trace_export.h>" \
+                  -vinc2="#include <'"$up"'drivers/kernelsu/ksu_trace_guard.h>" '
+                { print; if ($0 ~ /^#include/) last=NR }
+                END { if (last>=0) print inc1 "\n" inc2 }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
             else
-              # 没有 ksu_trace.h：尽量在本文件 include 区域末尾插入两者
-              if ! grep -q 'ksu_trace_guard.h' "$f"; then
-                awk 'BEGIN{done=0}
-                  {
-                    if (!done && $0 ~ /^#include/){ last=NR }
-                    print $0
-                  }
-                  END{
-                    if (last==0) last=1
-                  }' "$f" > "$f.tmp"
-                # 简化：直接在文件头追加（避免复杂定位）
-                sed -i '1i #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n#include <../drivers/kernelsu/ksu_trace.h>\n#include <../drivers/kernelsu/ksu_trace_guard.h>\n#endif\n' "$f"
-                rm -f "$f.tmp"
-              fi
+              sed -i "1i #include <${up}drivers/kernelsu/ksu_trace_export.h>\n#include <${up}drivers/kernelsu/ksu_trace_guard.h>\n" "$f"
             fi
-          done
-          
-          # 6) 把裸 trace 调用包成 KSU_TRACE_SAFE_CALL(...) （保持幂等）
-          wrap_call() {
-            local file="$1" sym="$2"
-            [ -f "$file" ] || return 0
-            # 如果已经有 KSU_TRACE_SAFE_CALL 就不动
-            if grep -q "KSU_TRACE_SAFE_CALL(.*${sym}" "$file"; then
-              return 0
-            fi
-            # 把以 trace_ksu_* 开头的一整行调用替换为 KSU_TRACE_SAFE_CALL(原调用)
-            # 仅替换该符号，避免误伤其他 trace
-            sed -i -E "s/^([[:space:]]*)(trace_${sym}\(.*\));/\\1KSU_TRACE_SAFE_CALL(\\2);/g" "$file"
           }
           
-          # 针对各文件具体符号处理
+          add_inc drivers/input/input.c ../../
+          add_inc drivers/tty/pty.c ../../
+          add_inc fs/exec.c ../
+          add_inc fs/open.c ../
+          add_inc fs/read_write.c ../
+          add_inc fs/stat.c ../
+          
+          ########################################
+          # 5) 将裸 trace 调用包裹成 KSU_TRACE_SAFE_CALL(...)
+          ########################################
+          wrap_call(){ local f="$1" sym="$2"; [ -f "$f" ] || return 0
+            # 已包裹则跳过
+            grep -q "KSU_TRACE_SAFE_CALL(.*${sym}" "$f" && return 0
+            sed -i -E "s/^([[:space:]]*)(trace_${sym}\(.*\));/\\1KSU_TRACE_SAFE_CALL(\\2);/g" "$f"
+          }
+          
           wrap_call "drivers/input/input.c" "ksu_trace_input_hook"
           wrap_call "drivers/tty/pty.c"    "ksu_trace_devpts_hook"
           wrap_call "fs/open.c"            "ksu_trace_faccessat_hook"
           wrap_call "fs/read_write.c"      "ksu_trace_sys_read_hook"
           wrap_call "fs/stat.c"            "ksu_trace_stat_hook"
           
-          # exec.c 两个调用点需要修参并包裹
+          ########################################
+          # 6) 特例修正：exec.c 的参数 + pty.c 的锁内调用
+          ########################################
+          # fs/exec.c：修正把 AT_FDCWD 当指针传入的问题，并用 SAFE 宏包裹
           if [ -f "fs/exec.c" ]; then
-            # 修掉把常量当指针传的问题，并包裹
-            # do_execve()
+            # do_execve(): trace_ksu_trace_execveat_hook(...)
             if grep -q "trace_ksu_trace_execveat_hook" fs/exec.c; then
               awk '
                 BEGIN{done=0}
@@ -540,13 +531,13 @@ jobs:
                   if (!done && $0 ~ /trace_ksu_trace_execveat_hook\(/) {
                     print "  /* KSU SAFE */"
                     print "  KSU_TRACE_SAFE_CALL({ int dfd = AT_FDCWD; trace_ksu_trace_execveat_hook(&dfd, &filename, &argv, &envp, 0); });"
-                    # 跳过原行
+                    # 跳过原始调用行
                     getline; next
                   }
                   print $0
                 }' fs/exec.c > fs/exec.c.tmp && mv fs/exec.c.tmp fs/exec.c
             fi
-            # do_execveat()
+            # do_execveat(): trace_ksu_trace_execveat_sucompat_hook(...)
             if grep -q "trace_ksu_trace_execveat_sucompat_hook" fs/exec.c; then
               awk '
                 BEGIN{done=0}
@@ -561,28 +552,31 @@ jobs:
             fi
           fi
           
-          # 7) pty.c：把 hook 挪到加锁后并用 d_inode()
+          # drivers/tty/pty.c：把 hook 放到 mutex 加锁后，并用 d_inode()
           if [ -f "drivers/tty/pty.c" ]; then
-            # 删除加锁前的旧调用（如果有）
-            sed -i '/trace_ksu_trace_devpts_hook(.*d_inode/d' drivers/tty/pty.c || true
+            # 删除加锁前的旧调用（如果存在）
             sed -i '/trace_ksu_trace_devpts_hook(.*f_path\.dentry->d_inode/d' drivers/tty/pty.c || true
-            # 确保加锁后存在安全包裹（前面 wrap_call 已做；这里再补充一次更稳）
-            awk '
-              BEGIN{saw=0}
-              {
-                print $0
-                if ($0 ~ /mutex_lock\(&devpts_mutex\)/ && saw==0) {
-                  print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
-                  print "  KSU_TRACE_SAFE_CALL({ struct inode *inode = d_inode(file->f_path.dentry); if (inode) trace_ksu_trace_devpts_hook(inode); });"
-                  print "#endif"
-                  saw=1
-                }
-              }' drivers/tty/pty.c > drivers/tty/pty.c.tmp && mv drivers/tty/pty.c.tmp drivers/tty/pty.c
+            sed -i '/trace_ksu_trace_devpts_hook(.*d_inode/d' drivers/tty/pty.c || true
+            # 在 mutex_lock(&devpts_mutex) 后注入（若未注入）
+            if ! grep -q 'ksu_trace_devpts_hook.*d_inode' drivers/tty/pty.c; then
+              awk '
+                BEGIN{done=0}
+                {
+                  print $0
+                  if (!done && $0 ~ /mutex_lock\(&devpts_mutex\)/) {
+                    print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
+                    print "  KSU_TRACE_SAFE_CALL({ struct inode *inode = d_inode(file->f_path.dentry); if (inode) trace_ksu_trace_devpts_hook(inode); });"
+                    print "#endif"
+                    done=1
+                  }
+                }' drivers/tty/pty.c > drivers/tty/pty.c.tmp && mv drivers/tty/pty.c.tmp drivers/tty/pty.c
+            fi
           fi
           
-          echo "[info] KSU trace guard + toggle files created and callsites guarded."
-
+          echo "[ok] KernelSU trace guard/toggle integrated (no external patches)."
+          echo "[hint] 开机后如需启用： mount -t debugfs debugfs /sys/kernel/debug || true && echo 1 > /sys/kernel/debug/ksu_trace/enable"
           
+                    
           echo "完成"
 
 
