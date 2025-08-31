@@ -483,18 +483,21 @@ jobs:
           add_inc() {
             local f="$1" up="$2"  # up: 相对层级("../" 或 "../../")
             [ -f "$f" ] || return 0
-            # 清理旧的包含，防止重复
+            # 清理旧包含，防重复
             sed -i '/ksu_trace_guard\.h/d;/ksu_trace_export\.h/d;/ksu_trace\.h/d' "$f"
-            # 在最后一个 #include 之后附加（找不到就直接插到文件头）
+            # 拼接正确的 include 行（不加多余引号）
+            local inc1="#include <${up}drivers/kernelsu/ksu_trace_export.h>"
+            local inc2="#include <${up}drivers/kernelsu/ksu_trace_guard.h>"
             if grep -q '^#include' "$f"; then
-              awk -vinc1="#include <'"$up"'drivers/kernelsu/ksu_trace_export.h>" \
-                  -vinc2="#include <'"$up"'drivers/kernelsu/ksu_trace_guard.h>" '
+              awk -v inc1="$inc1" -v inc2="$inc2" '
                 { print; if ($0 ~ /^#include/) last=NR }
                 END { if (last>=0) print inc1 "\n" inc2 }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
             else
-              sed -i "1i #include <${up}drivers/kernelsu/ksu_trace_export.h>\n#include <${up}drivers/kernelsu/ksu_trace_guard.h>\n" "$f"
+              # 没有 #include 的古怪文件：直接插到文件头
+              printf "%s\n%s\n" "$inc1" "$inc2" | cat - "$f" > "$f.tmp" && mv "$f.tmp" "$f"
             fi
           }
+
           
           add_inc drivers/input/input.c ../../
           add_inc drivers/tty/pty.c ../../
