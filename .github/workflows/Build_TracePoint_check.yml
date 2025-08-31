@@ -285,165 +285,62 @@ jobs:
             ./setup.bin
       - name: 🔧 Set up SUSFS (配置 SUSFS)
         run: |
+          set -eo pipefail
           cd kernel_workspace
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6
           git clone https://github.com/SukiSU-Ultra/SukiSU_patch.git
           
-          cd kernel_platform        
+          cd kernel_platform
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           cd ./common
+          
+          # 正确的 OR 条件
           if [ "${REPO_MANIFEST}" = "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" = "oneplus_13t" ]; then
             sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
           fi
-          if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" != "realme_GT7" ]; then
-              files=(
-                  "lib/lz4/lz4_compress.c"
-                  "lib/lz4/lz4_decompress.c"
-                  "lib/lz4/lz4defs.h"
-                  "lib/lz4/lz4hc_compress.c"
-              )
-              for file in "${files[@]}"; do
-                  if [ -e "$file" ]; then
-                      rm "$file"
-                  fi
-              done
-              cp -r "${GITHUB_WORKSPACE}/zram/lz4/"* ./lib/lz4/
-              cp -r "${GITHUB_WORKSPACE}/zram/include/linux/"* ./include/linux/
-              cp "${GITHUB_WORKSPACE}/zram/6.6/lz4_1.10.0.patch" ./
-              patch -p1 -F 3 --fuzz=5 < lz4_1.10.0.patch || true
-              
-              if [ -f "fs/f2fs/Makefile" ]; then
-                  if ! grep -qF "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" "fs/f2fs/Makefile"; then
-                      echo "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" >> "fs/f2fs/Makefile"
-                      echo "已添加: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
-                  else
-                      echo "文件已经包含: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
-                  fi
+          
+          # if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" != "realme_GT7" ]; then
+            files=(
+              "lib/lz4/lz4_compress.c"
+              "lib/lz4/lz4_decompress.c"
+              "lib/lz4/lz4defs.h"
+              "lib/lz4/lz4hc_compress.c"
+            )
+            for file in "${files[@]}"; do
+              [ -e "$file" ] && rm "$file"
+            done
+            cp -r "${GITHUB_WORKSPACE}/zram/lz4/"* ./lib/lz4/
+            cp -r "${GITHUB_WORKSPACE}/zram/include/linux/"* ./include/linux/
+            cp "${GITHUB_WORKSPACE}/zram/6.6/lz4_1.10.0.patch" ./
+            patch -p1 -F 3 --fuzz=5 < lz4_1.10.0.patch || true
+          
+            if [ -f "fs/f2fs/Makefile" ]; then
+              if ! grep -qF "f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o" "fs/f2fs/Makefile"; then
+                echo 'f2fs-$(CONFIG_F2FS_IOSTAT) += iostat.o' >> "fs/f2fs/Makefile"
+                echo "已添加: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
               else
-                  echo "文件不存在: fs/f2fs/Makefile"
+                echo "文件已经包含: f2fs-\$(CONFIG_F2FS_IOSTAT) += iostat.o"
               fi
-          fi
-          
-          if [ "${REPO_MANIFEST}" = "realme_GT7pro_Speed" ] || [ "${REPO_MANIFEST}" = "realme_GT7pro" ]; then
-               sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
-               sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
-          fi
-          patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-          # === 复制补丁 ===
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/fix_tracepoint_hooks.patch" ./ || {
-            echo "[warn] fix_tracepoint_hooks.patch not found"; exit 0; }
-          
-          # === 统一行尾 + 去BOM（防 'malformed patch'）===
-          # 去BOM
-          if [ "$(head -c3 fix_tracepoint_hooks.patch | hexdump -v -e '/1 "%02x"')" = "efbbbf" ]; then
-            tail -c +4 fix_tracepoint_hooks.patch > .fix.tmp && mv .fix.tmp fix_tracepoint_hooks.patch
-          fi
-          # 转 LF
-          sed -i 's/\r$//' fix_tracepoint_hooks.patch
-          
-          # === 先试 git apply （三方合并），再退回 patch ===
-          APPLIED_OK=0
-          if git apply --check -p1 fix_tracepoint_hooks.patch 2>/dev/null; then
-            echo "[info] applying via git apply --3way ..."
-            if git apply -p1 --3way --whitespace=nowarn fix_tracepoint_hooks.patch; then
-              APPLIED_OK=1
-            fi
-          fi
-          
-          if [ $APPLIED_OK -eq 0 ]; then
-            echo "[info] applying via patch -F3 ..."
-            # 如果整包失败，我们尝试剥离掉 drivers/input/input.c 的块
-            # 先检测该文件的块是否存在
-            if grep -q "^diff --git a/drivers/input/input.c " fix_tracepoint_hooks.patch; then
-              # 备份并剥离该文件的 diff 块
-              cp fix_tracepoint_hooks.patch fix_tracepoint_hooks.full.patch
-              awk '
-                BEGIN{skip=0}
-                /^diff --git /{
-                  skip=0
-                  if ($3=="a/drivers/input/input.c" && $4=="b/drivers/input/input.c") {skip=1}
-                }
-                { if (!skip) print $0 }
-              ' fix_tracepoint_hooks.full.patch > fix_tracepoint_hooks.no_input.patch
-              # 先应用“去掉 input.c 的补丁”
-              patch -p1 -F 3 < fix_tracepoint_hooks.no_input.patch || true
             else
-              # 补丁里根本没 input.c 的块，直接走原 patch
-              patch -p1 -F 3 < fix_tracepoint_hooks.patch || true
+              echo "文件不存在: fs/f2fs/Makefile"
             fi
+          
+          # SUSFS 主补丁
+          patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
+          # 统一 diff（防重入 + static key + debugfs 开关，默认关闭）
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/0001-ksu-trace-guard-and-toggle.patch" ./ || {
+            echo "[warn] 0001-ksu-trace-guard-and-toggle.patch not found; skip"; true; }
+          if [ -f 0001-ksu-trace-guard-and-toggle.patch ]; then
+            # 应用前先把当前改动纳入索引，提升 3-way 成功率
+            git add -A
+            git apply -p1 --3way --whitespace=nowarn 0001-ksu-trace-guard-and-toggle.patch || {
+              echo "[warn] 3-way 失败，尝试容错 patch"; patch -p1 -F 3 < 0001-ksu-trace-guard-and-toggle.patch; }
           fi
           
-          # === 针对 drivers/input/input.c 的修改，用脚本直写（幂等）===
-          INPUT_C="drivers/input/input.c"
-          if [ -f "$INPUT_C" ]; then
-            echo "[info] patching $INPUT_C via scripted edits..."
-          
-            # 1) 头部插入 include 与 guard（在 "input-poller.h" 之后，且仅当未插入过）
-            if ! grep -q "KSU trace guard (local TU)" "$INPUT_C"; then
-              awk '
-                BEGIN{done=0}
-                {
-                  print $0
-                  if (!done && $0 ~ /#include "input-poller.h"/) {
-                    print ""
-                    print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
-                    print "#include <linux/kernel.h>"
-                    print "#include <linux/percpu.h>"
-                    print "#include <linux/preempt.h>"
-                    print "#include <linux/interrupt.h>"
-                    print "#include <linux/sched.h>"
-                    print "#include <linux/sched/task.h>"
-                    print "#include <linux/pid.h>"
-                    print "#include <../../drivers/kernelsu/ksu_trace.h>"
-                    print ""
-                    print "/* --- KSU trace guard (local TU) --- */"
-                    print "static DEFINE_PER_CPU(unsigned int, ksu_tp_depth);"
-                    print "static __always_inline bool ksu_trace_enter(void){"
-                    print "  bool ok=false; preempt_disable();"
-                    print "  if (__this_cpu_read(ksu_tp_depth) == 0){ __this_cpu_inc(ksu_tp_depth); ok=true; }"
-                    print "  preempt_enable(); return ok; }"
-                    print "static __always_inline void ksu_trace_exit(void){ preempt_disable(); __this_cpu_dec(ksu_tp_depth); preempt_enable(); }"
-                    print "static __always_inline bool ksu_runtime_ready(void){"
-                    print "  return likely(system_state == SYSTEM_RUNNING) && likely(!in_interrupt()) &&"
-                    print "         likely(!(current->flags & PF_KTHREAD)) &&"
-                    print "         likely(pid_task(find_vpid(1), PIDTYPE_PID)); }"
-                    print "#endif"
-                    print ""
-                    done=1
-                  }
-                }
-              ' "$INPUT_C" > "$INPUT_C.tmp" && mv "$INPUT_C.tmp" "$INPUT_C"
-            fi
-          
-            # 2) 在 input_event() 里插入调用（在声明 'unsigned long flags;' 后，且仅当未插入过）
-            if ! grep -q "trace_ksu_trace_input_hook" "$INPUT_C"; then
-              awk '
-                BEGIN{in_func=0; inserted=0}
-                {
-                  print $0
-                  if ($0 ~ /^void[ \t]+input_event\(/) in_func=1
-                  if (in_func && !inserted && $0 ~ /unsigned long flags;/) {
-                    print ""
-                    print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
-                    print "  if (likely(ksu_runtime_ready()) && ksu_trace_enter()) {"
-                    print "    trace_ksu_trace_input_hook(&type, &code, &value);"
-                    print "    ksu_trace_exit();"
-                    print "  }"
-                    print "#endif"
-                    print ""
-                    inserted=1
-                  }
-                  if (in_func && $0 ~ /^}/) in_func=0
-                }
-              ' "$INPUT_C" > "$INPUT_C.tmp" && mv "$INPUT_C.tmp" "$INPUT_C"
-            fi
-          else
-            echo "[warn] $INPUT_C not found; skip scripted edits."
-          fi
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/0001-ksu-trace-guard-and-toggle.patch" ./
-          git apply -p1 --3way 0001-ksu-trace-guard-and-toggle.patch
+          echo "完成"
+
 
 
 
