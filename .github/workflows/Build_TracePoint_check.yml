@@ -330,15 +330,13 @@ jobs:
           # SUSFS 主补丁
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           set -euo pipefail
-          #!/usr/bin/env bash
-          set -euo pipefail
-          # 必须在：kernel_workspace/kernel_platform/common
+          # 当前位置：kernel_workspace/kernel_platform/common
           
-          # 1) 确保源码文件在位（若你已手动放入，可跳过写入）
+          echo "[1/7] 写入守卫与开关源文件..."
           mkdir -p drivers/kernelsu include/linux
           
-          # -- ksu_trace_guard.h
-          cat > drivers/kernelsu/ksu_trace_guard.h <<'EOF'
+          # --- drivers/kernelsu/ksu_trace_guard.h（强防护 v2：static key + 安全上下文 + per-task + per-cpu） ---
+          cat > drivers/kernelsu/ksu_trace_guard.h << 'EOF'
           /* SPDX-License-Identifier: GPL-2.0 */
           #pragma once
           #include <linux/jump_label.h>
@@ -347,65 +345,94 @@ jobs:
           #include <linux/interrupt.h>
           #include <linux/sched.h>
           #include <linux/pid.h>
+          #include <linux/sched/mm.h>
+          #include <linux/rcupdate.h>
+          #include <linux/mm.h>
+          #include <linux/bitops.h>
           
-          /* defined in ksu_trace_toggle.c */
           DECLARE_STATIC_KEY_FALSE(ksu_tp_key);
           DECLARE_PER_CPU(unsigned int, ksu_tp_depth);
           
-          static __always_inline bool ksu_tp_on(void)
+          /* per-task 轻量防重入（跨CPU），1K位图 */
+          #ifndef KSU_TASK_GUARD_BITS
+          #define KSU_TASK_GUARD_BITS 1024
+          #endif
+          static unsigned long __ksu_task_guard_bitmap[BITS_TO_LONGS(KSU_TASK_GUARD_BITS)];
+          
+          static __always_inline u32 ksu_task_hash(const struct task_struct *t)
           {
-          	return static_branch_unlikely(&ksu_tp_key);
+          	u64 x = (u64)(uintptr_t)t ^ ((u64)task_pid_nr(t) << 17);
+          	x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+          	return (u32)(x & (KSU_TASK_GUARD_BITS - 1));
+          }
+          static __always_inline bool ksu_task_enter_once(const struct task_struct *t)
+          {
+          	u32 idx = ksu_task_hash(t);
+          	return !test_and_set_bit(idx, __ksu_task_guard_bitmap);
+          }
+          static __always_inline void ksu_task_leave(const struct task_struct *t)
+          {
+          	u32 idx = ksu_task_hash(t);
+          	clear_bit(idx, __ksu_task_guard_bitmap);
           }
           
-          /* Only run in safe contexts to avoid early-boot / atomic / recursion panics. */
+          /* 上下文安全：仅允许用户进程、RCU watching、非原子、非中断、非回收、系统已运行 */
           static __always_inline bool ksu_safe_context(void)
           {
           	if (unlikely(system_state != SYSTEM_RUNNING))
           		return false;
-          	if (unlikely(in_interrupt()) || unlikely(irqs_disabled()))
+          	if (unlikely(!rcu_is_watching()))
           		return false;
-          	if (unlikely(current->flags & PF_KTHREAD))
+          	if (unlikely(in_interrupt()) || unlikely(irqs_disabled()) || unlikely(oops_in_progress))
+          		return false;
+          	if (unlikely(!current->mm))
+          		return false;
+          	if (unlikely(current->flags & (PF_KTHREAD | PF_EXITING | PF_DUMPCORE |
+          	                               PF_MEMALLOC | PF_MEMALLOC_NOFS | PF_MEMALLOC_NOCMA)))
           		return false;
           	if (unlikely(preempt_count()))
           		return false;
-          	if (unlikely(!pid_task(find_vpid(1), PIDTYPE_PID))) /* init(1) present */
+          	if (unlikely(!pid_task(find_vpid(1), PIDTYPE_PID)))
           		return false;
           	return true;
           }
           
-          /* per-cpu reentrancy guard */
-          static __always_inline bool ksu_trace_enter(void)
+          /* per-cpu 深度，阻断同CPU重入 */
+          static __always_inline bool ksu_cpu_enter_once(void)
           {
-          	bool ok = false;
+          	bool ok=false;
           	preempt_disable();
           	if (__this_cpu_read(ksu_tp_depth) == 0) {
           		__this_cpu_inc(ksu_tp_depth);
-          		ok = true;
+          		ok=true;
           	}
           	preempt_enable();
           	return ok;
           }
-          
-          static __always_inline void ksu_trace_exit(void)
+          static __always_inline void ksu_cpu_leave(void)
           {
           	preempt_disable();
           	__this_cpu_dec(ksu_tp_depth);
           	preempt_enable();
           }
           
-          /* one-liner wrapper */
-          #define KSU_TRACE_SAFE_CALL(_call)                                      \
-          	do {                                                                \
-          		if (ksu_tp_on() && ksu_safe_context() && ksu_trace_enter()) {   \
-          			_call;                                                      \
-          			ksu_trace_exit();                                           \
-          		}                                                               \
+          /* 统一宏：static key + 安全上下文 + per-task + per-cpu */
+          #define KSU_TRACE_SAFE_CALL(_call)                                              \
+          	do {                                                                        \
+          		if (static_branch_unlikely(&ksu_tp_key) && ksu_safe_context()) {        \
+          			if (ksu_task_enter_once(current)) {                                 \
+          				if (ksu_cpu_enter_once()) {                                     \
+          					_call;                                                      \
+          					ksu_cpu_leave();                                            \
+          				}                                                               \
+          				ksu_task_leave(current);                                        \
+          			}                                                                   \
+          		}                                                                       \
           	} while (0)
-
           EOF
           
-          # -- ksu_trace_toggle.c
-          cat > drivers/kernelsu/ksu_trace_toggle.c <<'EOF'
+          # --- drivers/kernelsu/ksu_trace_toggle.c（debugfs: /sys/kernel/debug/ksu_trace/enable） ---
+          cat > drivers/kernelsu/ksu_trace_toggle.c << 'EOF'
           // SPDX-License-Identifier: GPL-2.0
           #include <linux/init.h>
           #include <linux/module.h>
@@ -414,7 +441,6 @@ jobs:
           #include <linux/jump_label.h>
           #include "ksu_trace_guard.h"
           
-          /* default OFF even if compiled in */
           DEFINE_STATIC_KEY_FALSE(ksu_tp_key);
           DEFINE_PER_CPU(unsigned int, ksu_tp_depth);
           
@@ -430,12 +456,9 @@ jobs:
           
           static ssize_t enable_write(struct file *f, const char __user *buf, size_t len, loff_t *ppos)
           {
-          	char kbuf[8];
-          	bool want;
-          	if (len > sizeof(kbuf) - 1)
-          		len = sizeof(kbuf) - 1;
-          	if (copy_from_user(kbuf, buf, len))
-          		return -EFAULT;
+          	char kbuf[8]; bool want;
+          	if (len > sizeof(kbuf) - 1) len = sizeof(kbuf) - 1;
+          	if (copy_from_user(kbuf, buf, len)) return -EFAULT;
           	kbuf[len] = '\0';
           	want = !!simple_strtoul(kbuf, NULL, 0);
           
@@ -450,66 +473,59 @@ jobs:
           }
           
           static const struct file_operations enable_fops = {
-          	.owner = THIS_MODULE,
-          	.open  = simple_open,
-          	.read  = enable_read,
-          	.write = enable_write,
-          	.llseek = default_llseek,
+          	.owner = THIS_MODULE, .open = simple_open, .read = enable_read,
+          	.write = enable_write, .llseek = default_llseek,
           };
           
           static int __init ksu_trace_toggle_init(void)
           {
           	ksu_dbg_dir = debugfs_create_dir("ksu_trace", NULL);
-          	if (IS_ERR_OR_NULL(ksu_dbg_dir))
-          		return 0; /* debugfs missing is fine */
-          
+          	if (IS_ERR_OR_NULL(ksu_dbg_dir)) return 0;
           	debugfs_create_file("enable", 0644, ksu_dbg_dir, NULL, &enable_fops);
-          	enabled_cached = false; /* stay OFF */
+          	enabled_cached = false; /* 默认关闭 */
           	return 0;
           }
           late_initcall(ksu_trace_toggle_init);
-
           EOF
           
-          # -- forwarders
-          cat > include/linux/ksu_trace_export.h <<'EOF'
+          echo "[2/7] 写入 forwarder 头（避免相对 include）..."
+          # --- include/linux/ksu_trace_export.h（优先 export.h，不在则回退 ksu_trace.h） ---
+          cat > include/linux/ksu_trace_export.h << 'EOF'
           /* SPDX-License-Identifier: GPL-2.0 */
           #ifndef _LINUX_KSU_TRACE_EXPORT_FWD_H
           #define _LINUX_KSU_TRACE_EXPORT_FWD_H
-          /* Prefer the light export header if present; otherwise fall back to full trace header */
           #if defined(__has_include)
           #  if __has_include("../../drivers/kernelsu/ksu_trace_export.h")
           #    include "../../drivers/kernelsu/ksu_trace_export.h"
           #  elif __has_include("../../drivers/kernelsu/ksu_trace.h")
           #    include "../../drivers/kernelsu/ksu_trace.h"
           #  else
-          #    error "KernelSU trace header (ksu_trace_export.h/ksu_trace.h) not found"
+          #    error "KernelSU trace header not found (ksu_trace_export.h/ksu_trace.h)"
           #  endif
           #else
           #  include "../../drivers/kernelsu/ksu_trace_export.h"
           #endif
           #endif
-
           EOF
-          cat > include/linux/ksu_trace_guard.h <<'EOF'
+          
+          # --- include/linux/ksu_trace_guard.h（转发到我们的守卫头） ---
+          cat > include/linux/ksu_trace_guard.h << 'EOF'
           /* SPDX-License-Identifier: GPL-2.0 */
           #ifndef _LINUX_KSU_TRACE_GUARD_FWD_H
           #define _LINUX_KSU_TRACE_GUARD_FWD_H
           #include "../../drivers/kernelsu/ksu_trace_guard.h"
           #endif
-
           EOF
           
-          # 2) Makefile 增加 toggle.o
+          echo "[3/7] Makefile 增加 toggle.o..."
           mf="drivers/kernelsu/Makefile"
           if [ -f "$mf" ] && ! grep -q 'ksu_trace_toggle\.o' "$mf"; then
             printf '\n# runtime toggle for trace hooks (default OFF)\nobj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_trace_toggle.o\n' >> "$mf"
           fi
           
-          # 3) 在 6 个调用点文件中把 include 插到“所有 #include 之后”
+          echo "[4/7] 顶部插入 include（3 个点：exec/input/pty）..."
           fix_includes_top() {
             local f="$1"; [ -f "$f" ] || return 0
-            # 清理旧 include，避免重复和冲突
             sed -i '/ksu_trace_guard\.h/d;/ksu_trace_export\.h/d;/ksu_trace\.h/d' "$f"
             awk '
               BEGIN{ last=0 }
@@ -524,7 +540,7 @@ jobs:
                     print "#endif"
                   }
                 }
-                if (NR==0){ /* 空文件兜底 */
+                if (NR==0){
                   print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
                   print "#include <linux/ksu_trace_export.h>"
                   print "#include <linux/ksu_trace_guard.h>"
@@ -532,25 +548,12 @@ jobs:
                 }
               }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
           }
+          fix_includes_top fs/exec.c
           fix_includes_top drivers/input/input.c
           fix_includes_top drivers/tty/pty.c
-          fix_includes_top fs/exec.c
-          fix_includes_top fs/open.c
-          fix_includes_top fs/read_write.c
-          fix_includes_top fs/stat.c
           
-          # 4) 将裸 trace 调用包裹成 KSU_TRACE_SAFE_CALL(...)
-          wrap_call(){ local f="$1" sym="$2"; [ -f "$f" ] || return 0
-            grep -q "KSU_TRACE_SAFE_CALL(.*${sym}" "$f" && return 0
-            sed -i -E "s/^([[:space:]]*)(trace_${sym}\(.*\));/\\1KSU_TRACE_SAFE_CALL(\\2);/g" "$f"
-          }
-          wrap_call "drivers/input/input.c" "ksu_trace_input_hook"
-          wrap_call "drivers/tty/pty.c"    "ksu_trace_devpts_hook"
-          wrap_call "fs/open.c"            "ksu_trace_faccessat_hook"
-          wrap_call "fs/read_write.c"      "ksu_trace_sys_read_hook"
-          wrap_call "fs/stat.c"            "ksu_trace_stat_hook"
-          
-          # 5) exec.c：修正把 AT_FDCWD 当指针传入的问题，并用 SAFE 宏包裹
+          echo "[5/7] 注入最小调用点..."
+          # -- exec.c：do_execve 与 do_execveat（只在这里，避免高频 VFS 热路径）
           if [ -f "fs/exec.c" ]; then
             awk '
               {
@@ -568,11 +571,32 @@ jobs:
               }' fs/exec.c > fs/exec.c.tmp && mv fs/exec.c.tmp fs/exec.c
           fi
           
-          # 6) pty.c：优先在 pts_unix98_lookup() 中插入（变量名是 file），若没有则退回 pty_close()（变量名 filp）
-          # 先清理旧的
-          sed -i '/trace_ksu_trace_devpts_hook/d' drivers/tty/pty.c || true
+          # -- input.c：input_event 内（用户输入较晚触发）
+          if [ -f "drivers/input/input.c" ]; then
+            if ! grep -q 'trace_ksu_trace_input_hook' drivers/input/input.c; then
+              # 在 "unsigned long flags;" 之后插入
+              awk '
+                BEGIN{infunc=0; injected=0}
+                {
+                  print
+                  if ($0 ~ /^void[ \t]+input_event\(/) infunc=1
+                  if (infunc && !injected && $0 ~ /unsigned long flags;/) {
+                    print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
+                    print "  KSU_TRACE_SAFE_CALL(trace_ksu_trace_input_hook(&type, &code, &value));"
+                    print "#endif"
+                    injected=1
+                  }
+                  if (infunc && $0 ~ /^}/) infunc=0
+                }' drivers/input/input.c > drivers/input/input.c.tmp && mv drivers/input/input.c.tmp drivers/input/input.c
+            else
+              # 已有裸调用则包裹
+              sed -i -E 's/([[:space:]]*)trace_ksu_trace_input_hook\((.*)\);/\1KSU_TRACE_SAFE_CALL(trace_ksu_trace_input_hook(\2));/g' drivers/input/input.c
+            fi
+          fi
           
-          if grep -q '^static[[:space:]]\+struct[[:space:]]\+tty_struct[[:space:]]\*\s*pts_unix98_lookup' drivers/tty/pty.c; then
+          # -- pty.c：优先 pts_unix98_lookup（变量名 file）；若没有，退回 pty_close（变量名 filp）
+          sed -i '/trace_ksu_trace_devpts_hook/d' drivers/tty/pty.c || true
+          if grep -q '^static[[:space:]]\+struct[[:space:]]\+tty_struct[[:space:]]*\* *pts_unix98_lookup' drivers/tty/pty.c; then
             awk '
               BEGIN{infun=0; inserted=0}
               {
@@ -601,17 +625,20 @@ jobs:
                 if (infun && $0 ~ /^}/) { infun=0 }
               }' drivers/tty/pty.c > drivers/tty/pty.c.tmp && mv drivers/tty/pty.c.tmp drivers/tty/pty.c
           else
-            echo "[warn] neither pts_unix98_lookup() nor pty_close() found; skip devpts hook insertion."
+            echo "[warn] 未找到 pts_unix98_lookup()/pty_close()，跳过 devpts hook"
           fi
           
-          # 7) 打印检查
-          echo "[check] include usages:"
-          grep -R --line-number -E 'ksu_trace_(export|guard)\.h' fs drivers || true
+          echo "[6/7] 确保未触碰高频 VFS 路径（read/stat/faccessat）..."
+          # 万一之前加过，先移除，避免早期递归/高频触发
+          sed -i '/trace_ksu_trace_sys_read_hook/d' fs/read_write.c 2>/dev/null || true
+          sed -i '/trace_ksu_trace_stat_hook/d' fs/stat.c        2>/dev/null || true
+          sed -i '/trace_ksu_trace_faccessat_hook/d' fs/open.c    2>/dev/null || true
           
-          echo "[ok] KernelSU trace guard/toggle integrated (no external patches)."
-          echo "[hint] 开机后如需启用： mount -t debugfs debugfs /sys/kernel/debug || true && echo 1 > /sys/kernel/debug/ksu_trace/enable"
+          echo "[7/7] 快速自检："
+          grep -R --line-number -E 'ksu_trace_(export|guard)\.h' fs drivers || true
+          echo "[OK] 最小 Tracepoint 集成完成（默认关闭）。"
+          echo "[HINT] 启用： mount -t debugfs debugfs /sys/kernel/debug || true && echo 1 > /sys/kernel/debug/ksu_trace/enable"
 
-          echo "完成"
 
 
 
@@ -652,6 +679,7 @@ jobs:
           # Add VFS configuration settings
           echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_TRACEPOINT_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_DEBUG_FS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KPM=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
