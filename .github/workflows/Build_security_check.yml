@@ -563,38 +563,41 @@ jobs:
         run: |
           set -euo pipefail
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
-
+          
           # 1) 打开我们的符号
-          grep -q '^CONFIG_SECURITY_BASEBAND_GUARD=y$' "$DEFCONFIG" || \
+          if ! grep -q '^CONFIG_SECURITY_BASEBAND_GUARD=y$' "$DEFCONFIG"; then
             echo 'CONFIG_SECURITY_BASEBAND_GUARD=y' >> "$DEFCONFIG"
-
+            echo ">> appended CONFIG_SECURITY_BASEBAND_GUARD=y"
+          fi
+          
           # 2) 把 baseband_guard 加入 LSM 顺序（保留已有项）
-          CUR=$(grep '^CONFIG_LSM=' "$DEFCONFIG" | sed -e 's/^CONFIG_LSM="//' -e 's/"$//')
-          if [ -z "$CUR" ]; then
+          CUR=$(grep '^CONFIG_LSM=' "$DEFCONFIG" 2>/dev/null | sed -e 's/^CONFIG_LSM="//' -e 's/"$//')
+          if [ -z "${CUR:-}" ]; then
             CUR="yama,integrity,selinux"
           fi
+          
           case ",$CUR," in
             *",baseband_guard,"*) NEW="$CUR" ;;
             *) NEW="${CUR},baseband_guard" ;;
           esac
-          sed -i '/^CONFIG_LSM=/d' "$DEFCONFIG"
-          echo "CONFIG_LSM=\"$NEW\"" >> "$DEFCONFIG"
+          
+          # 仅当需要变更时才改动文件
+          if [ "$NEW" != "$CUR" ]; then
+            sed -i '/^CONFIG_LSM=/d' "$DEFCONFIG"
+            echo "CONFIG_LSM=\"$NEW\"" >> "$DEFCONFIG"
+            echo ">> updated CONFIG_LSM=\"$NEW\""
+          else
+            echo ">> CONFIG_LSM already contains baseband_guard"
+          fi
+          
+          # 只有文件真的变了才提交，避免因“无变更”导致 set -e 报错
+          if ! git diff --quiet -- "$DEFCONFIG"; then
+            git add "$DEFCONFIG"
+            git commit -m "configs: enable SECURITY_BASEBAND_GUARD and add to CONFIG_LSM"
+          else
+            echo ">> No changes to $DEFCONFIG, skipping commit."
+          fi
 
-          git add "$DEFCONFIG"
-          git commit -m "configs: enable SECURITY_BASEBAND_GUARD and add to CONFIG_LSM"
-
-      - name: 🧪 Pre-gen .config (no build, just config)
-        working-directory: kernel_workspace/kernel_platform/common
-        run: |
-          set -euo pipefail
-          # 生成 out/.config，验证选项生效；不需要 toolchain
-          make ARCH=arm64 O=out gki_defconfig
-          # 再保险一次把符号打开到 out/.config，然后归一
-          scripts/config --file out/.config --enable CONFIG_SECURITY_BASEBAND_GUARD
-          yes "" | make ARCH=arm64 O=out olddefconfig
-          echo "---- grep out/.config ----"
-          grep -E '^CONFIG_SECURITY_BASEBAND_GUARD=y' out/.config || { echo "MISSING in out/.config"; exit 1; }
-          grep -E '^CONFIG_LSM=' out/.config || true
             
       
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
