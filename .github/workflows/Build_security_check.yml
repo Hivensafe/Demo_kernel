@@ -250,20 +250,19 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform/common
           cp -f "${GITHUB_WORKSPACE}/.github/workflows/tools/security_guard-LSM.patch" guard.patch
-          # 消毒：去掉 YAML 缩进/Windows 换行符/末尾空行
-          sed -i 's/^[[:space:]]\+//' guard.patch
-          sed -i 's/\r$//' guard.patch
-          [ -s guard.patch ] && [ "$(tail -c1 guard.patch)" != "" ] && echo >> guard.patch
-          
-          # 尝试应用，失败则显示上下文
-          if ! git apply --3way guard.patch; then
-            echo "Patch failed, showing context around line 36:"
-            nl -ba guard.patch | sed -n '30,45p'
-            exit 1
-          fi
-          
-          echo "防格机补丁应用完成"
 
+          # 只处理 CRLF 和 BOM，不改动行首空格
+          sed -i 's/\r$//' guard.patch
+          # 去掉 UTF-8 BOM（如果有）
+          if [ "$(head -c3 guard.patch)" = $'\xef\xbb\xbf' ]; then
+             tail -c +4 guard.patch > guard.tmp && mv guard.tmp guard.patch
+          fi
+          # 确保文件最后有换行
+          [ -s guard.patch ] && [ "$(tail -c1 guard.patch)" != "" ] && echo >> guard.patch
+
+          # 应用补丁
+          git apply --3way guard.patch
+          echo "防格机补丁应用完成"
           
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
