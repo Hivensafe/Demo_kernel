@@ -247,10 +247,189 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
       
-      - name: Apply LSM patch
-        working-directory: kernel_workspace/kernel_platform/common
-        run: git am ${GITHUB_WORKSPACE}/.github/workflows/tools/security_guard-LSM.patch
-          
+      - name: 🚫 Patchless install baseband_guard (write files directly)
+  working-directory: kernel_workspace/kernel_platform/common
+  run: |
+    set -euo pipefail
+
+    # 1) 写入 security/baseband_guard_op13.h
+    cat > security/baseband_guard_op13.h <<'H'
+    /* SPDX-License-Identifier: GPL-2.0 */
+    static const char * const protected_names[] = {
+      /* Baseband / NV */
+      "modem","modemst1","modemst2","fsg","fsc","bluetooth",
+      "persist","qweslicstore","oplusstanvbk","oplusdycnvbk","mdm1oemnvbktmp",
+      /* Bootloader / secure firmware / AVB chain */
+      "xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
+      "keymaster","aop","aop_config","devcfg","qupfw",
+      "vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_product",
+      /* UEFI-like */
+      "uefisecapp","uefivarstore",
+      /* NOTE: boot/vendor_boot/dtbo 默认不锁，需时用参数开启 */
+      NULL,
+    };
+    H
+
+    # 2) 写入 security/baseband_guard.c
+    cat > security/baseband_guard.c <<'C'
+    // SPDX-License-Identifier: GPL-2.0
+    #include <linux/lsm_hooks.h>
+    #include <linux/fs.h>
+    #include <linux/dcache.h>
+    #include <linux/namei.h>
+    #include <linux/blkdev.h>
+    #include <linux/uaccess.h>
+    #include <linux/slab.h>
+    #include <linux/moduleparam.h>
+    #include <linux/string.h>
+
+    #ifndef BLKDISCARD
+    #define BLKDISCARD     _IO(0x12,119)
+    #endif
+    #ifndef BLKSECDISCARD
+    #define BLKSECDISCARD  _IO(0x12,125)
+    #endif
+    #ifndef BLKZEROOUT
+    #define BLKZEROOUT     _IO(0x12,127)
+    #endif
+    #ifndef BLKPG
+    #define BLKPG          _IO(0x12,105)
+    #endif
+
+    static int guard_enabled = 1;
+    module_param(guard_enabled, int, 0644);
+    static int allow_in_recovery = 1;
+    module_param(allow_in_recovery, int, 0644);
+    static int protect_bootimg = 0;
+    module_param(protect_bootimg, int, 0644);
+    static int block_wholedisk = 1;
+    module_param(block_wholedisk, int, 0644);
+
+    #include "baseband_guard_op13.h"
+
+    static const char * const bootimg_names[] = { "boot","vendor_boot","dtbo", NULL };
+
+    static bool bb_cmdline_is_recovery(void) {
+      extern const char *saved_command_line;
+      if (!saved_command_line) return false;
+      return strstr(saved_command_line, "androidboot.mode=recovery") ||
+             strstr(saved_command_line, "bootmode=recovery");
+    }
+    static bool bb_should_block(void) {
+      if (!guard_enabled) return false;
+      if (allow_in_recovery && bb_cmdline_is_recovery()) return false;
+      return true;
+    }
+    static bool bb_match_byname(const char *path, const char *name) {
+      char n[96];
+      if (!path||!name) return false;
+      snprintf(n,sizeof(n),"/by-name/%s",name);       if (strstr(path,n)) return true;
+      snprintf(n,sizeof(n),"/by-name/%s_a",name);     if (strstr(path,n)) return true;
+      snprintf(n,sizeof(n),"/by-name/%s_b",name);     if (strstr(path,n)) return true;
+      return false;
+    }
+    static bool bb_match_any_protected_byname(const char *path) {
+      const char * const *p;
+      if (!path || !strstr(path,"/dev/block/")) return false;
+      for (p=protected_names; *p; ++p) if (bb_match_byname(path,*p)) return true;
+      if (protect_bootimg) for (p=bootimg_names; *p; ++p) if (bb_match_byname(path,*p)) return true;
+      return false;
+    }
+    static bool bb_path_is_wholedisk(const char *path) {
+      if (!path || !strstr(path,"/dev/block/")) return false;
+      size_t len=strlen(path);
+      if (len>=5 && !strncmp(path+len-4,"/sd",3)) { char c=path[len-1]; if (c>='a'&&c<='z') return true; }
+      if (strstr(path,"/mmcblk")) { if (!strstr(path,"p")) return true; }
+      if (strstr(path,"/nvme") && strstr(path,"n") && !strstr(path,"p")) return true;
+      return false;
+    }
+    static bool bb_path_is_passthru_chr(const char *path) {
+      if (!path) return false;
+      return strstr(path,"/dev/sg") || strstr(path,"/dev/bsg/") || strstr(path,"/dev/nvme");
+    }
+    static bool bb_get_path_str(const struct path *path, char **out, char **page) {
+      char *buf=(char *)__get_free_page(GFP_KERNEL); char *p;
+      if (!buf) return false; p=d_path(path,buf,PAGE_SIZE); if (IS_ERR(p)){free_page((unsigned long)buf);return false;}
+      *out=p; *page=buf; return true;
+    }
+    static bool bb_get_file_path_str(struct file *f, char **out, char **page) { if (!f) return false; return bb_get_path_str(&f->f_path,out,page); }
+
+    static bool bb_should_deny_open_write(const struct path *path, umode_t mode) {
+      char *buf=NULL,*p=NULL; bool deny=false; if (!bb_should_block()) return false; if (!path||!d_inode(path->dentry)) return false;
+      if (S_ISCHR(d_inode(path->dentry)->i_mode)) { if (bb_get_path_str(path,&p,&buf)){ if (bb_path_is_passthru_chr(p)) deny=true; free_page((unsigned long)buf);} return deny; }
+      if (S_ISBLK(d_inode(path->dentry)->i_mode)) { if (bb_get_path_str(path,&p,&buf)){ if (bb_match_any_protected_byname(p)) deny=true; else if (block_wholedisk && bb_path_is_wholedisk(p)) deny=true; free_page((unsigned long)buf);} }
+      return deny;
+    }
+    static bool bb_should_deny_file_write(struct file *f) {
+      char *buf=NULL,*p=NULL; bool deny=false; if (!bb_should_block()) return false; if (!f||!file_inode(f)) return false;
+      if (S_ISCHR(file_inode(f)->i_mode)) { if (bb_get_file_path_str(f,&p,&buf)){ if (bb_path_is_passthru_chr(p)) deny=true; free_page((unsigned long)buf);} return deny; }
+      if (S_ISBLK(file_inode(f)->i_mode)) { if (bb_get_file_path_str(f,&p,&buf)){ if (bb_match_any_protected_byname(p)) deny=true; else if (block_wholedisk && bb_path_is_wholedisk(p)) deny=true; free_page((unsigned long)buf);} }
+      return deny;
+    }
+    static bool bb_is_protected_ioctl_target(struct file *f) { return bb_should_deny_file_write(f); }
+
+    static int bb_path_open(struct path *path, int flags, umode_t mode) {
+      if ((flags&(O_WRONLY|O_RDWR)) && bb_should_deny_open_write(path,mode)) return -EPERM; return 0;
+    }
+    static int bb_file_permission(struct file *f, int mask) {
+      if ((mask & MAY_WRITE) && bb_should_deny_file_write(f)) return -EPERM; return 0;
+    }
+    static int bb_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
+      if (!bb_should_block()||!f||!file_inode(f)) return 0;
+      if (S_ISCHR(file_inode(f)->i_mode)) { if (bb_is_protected_ioctl_target(f)) return -EPERM; return 0; }
+      if (S_ISBLK(file_inode(f)->i_mode)) { if (!bb_is_protected_ioctl_target(f)) return 0;
+        switch(cmd){case BLKDISCARD:case BLKSECDISCARD:case BLKZEROOUT:case BLKPG:return -EPERM; default:break;} }
+      return 0;
+    }
+
+    static struct security_hook_list bb_hooks[] __lsm_ro_after_init = {
+      LSM_HOOK_INIT(path_open, bb_path_open),
+      LSM_HOOK_INIT(file_permission, bb_file_permission),
+      LSM_HOOK_INIT(file_ioctl, bb_file_ioctl),
+    };
+
+    static int __init bb_init(void) {
+      security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
+      pr_info("baseband_guard: init (enabled=%d, recovery=%d, bootimg=%d, wholedisk=%d)\n",
+              guard_enabled, allow_in_recovery, protect_bootimg, block_wholedisk);
+      return 0;
+    }
+    DEFINE_LSM(baseband_guard) = { .name="baseband_guard", .init=bb_init, };
+    C
+
+    # 3) 修改 security/Makefile
+    if ! grep -q 'baseband_guard.o' security/Makefile; then
+      echo 'obj-$(CONFIG_SECURITY_BASEBAND_GUARD) += baseband_guard.o' >> security/Makefile
+    fi
+
+    # 4) 修改 security/Kconfig：在最后一个 "endmenu" 之前插入我们的 config
+    awk '
+      BEGIN {done=0}
+      /^endmenu$/ && !done {
+        print ""
+        print "config SECURITY_BASEBAND_GUARD"
+        print "\tbool \"Deny writes to baseband/bootloader partitions (Android)\""
+        print "\tdepends on SECURITY"
+        print "\tdefault y"
+        print "\thelp"
+        print "\t  Adds an LSM named \\\"baseband_guard\\\" that denies write and destructive"
+        print "\t  ioctl operations (BLKDISCARD/BLKSECDISCARD/BLKZEROOUT/BLKPG) to"
+        print "\t  critical partitions by /dev/block/by-name/* (A/B aware)."
+        print "\t  Also denies passthrough on /dev/sg*, /dev/bsg/*, /dev/nvme*,"
+        print "\t  and can block whole-disk destructive ops."
+        print \"\"
+        done=1
+      }
+      {print}
+    ' security/Kconfig > security/Kconfig.new && mv security/Kconfig.new security/Kconfig
+
+    # 5) 启用 defconfig 选项
+    DEFCONFIG="arch/arm64/configs/gki_defconfig"
+    grep -q '^CONFIG_SECURITY_BASEBAND_GUARD=y$' "$DEFCONFIG" || echo 'CONFIG_SECURITY_BASEBAND_GUARD=y' >> "$DEFCONFIG"
+
+    # 6) 创建提交（便于审计）
+    git add security/baseband_guard.c security/baseband_guard_op13.h security/Makefile security/Kconfig
+    git commit -m "security: add baseband_guard LSM (OP13 list)"
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
