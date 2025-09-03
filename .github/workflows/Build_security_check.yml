@@ -603,6 +603,12 @@ jobs:
           else
             echo ">> No changes to $DEFCONFIG, skipping commit."
           fi
+          # 1) 修正 saved_command_line 的声明类型（去掉 const）
+          sed -i 's/extern \s*const \s*char \s*\*saved_command_line;/extern char *saved_command_line;/' security/baseband_guard.c
+          
+          # 2) 将 __lsm_ro_after_init 替换为 __ro_after_init（或你也可以直接去掉该属性）
+          sed -i 's/__lsm_ro_after_init/__ro_after_init/g' security/baseband_guard.c
+          
 
 
             
