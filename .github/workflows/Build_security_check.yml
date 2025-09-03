@@ -571,7 +571,9 @@ jobs:
           fi
           
           # 2) 把 baseband_guard 加入 LSM 顺序（保留已有项）
-          CUR=$(grep '^CONFIG_LSM=' "$DEFCONFIG" 2>/dev/null | sed -e 's/^CONFIG_LSM="//' -e 's/"$//')
+          # 避免 pipefail 影响命令替换：要么在子 shell 内处理，要么在替换里加 || true
+          # 这里选“加 || true”
+          CUR="$(grep -oP '^CONFIG_LSM="\K.*(?="$)' "$DEFCONFIG" || true)"
           if [ -z "${CUR:-}" ]; then
             CUR="yama,integrity,selinux"
           fi
@@ -592,11 +594,16 @@ jobs:
           
           # 只有文件真的变了才提交，避免因“无变更”导致 set -e 报错
           if ! git diff --quiet -- "$DEFCONFIG"; then
+            # 以防未配置身份，顺便写上 git identity（无就写，有就忽略）
+            git config user.name  "ci-bot" || true
+            git config user.email "ci-bot@users.noreply.github.com" || true
+          
             git add "$DEFCONFIG"
             git commit -m "configs: enable SECURITY_BASEBAND_GUARD and add to CONFIG_LSM"
           else
             echo ">> No changes to $DEFCONFIG, skipping commit."
           fi
+
 
             
       
