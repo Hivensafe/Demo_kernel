@@ -249,9 +249,21 @@ jobs:
       - name: 🔒 Apply Baseband/Bootloader Guard LSM (应用防格机补丁)
         run: |
           cd kernel_workspace/kernel_platform/common
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/security_guard-LSM.patch" ./
-          git apply --3way security_guard-LSM.patch
+          cp -f "${GITHUB_WORKSPACE}/.github/workflows/tools/security_guard-LSM.patch" guard.patch
+          # 消毒：去掉 YAML 缩进/Windows 换行符/末尾空行
+          sed -i 's/^[[:space:]]\+//' guard.patch
+          sed -i 's/\r$//' guard.patch
+          [ -s guard.patch ] && [ "$(tail -c1 guard.patch)" != "" ] && echo >> guard.patch
+          
+          # 尝试应用，失败则显示上下文
+          if ! git apply --3way guard.patch; then
+            echo "Patch failed, showing context around line 36:"
+            nl -ba guard.patch | sed -n '30,45p'
+            exit 1
+          fi
+          
           echo "防格机补丁应用完成"
+
           
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
