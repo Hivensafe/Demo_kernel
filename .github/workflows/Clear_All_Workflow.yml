@@ -9,7 +9,7 @@ on:
         required: true
         default: 'Build_serialID_check'
         options:
-          - Build_oneplus_sm8750
+          - Build_security_check
           - Encrypt_script
           - Build_serialID_check
           - Build_TracePoint_test
