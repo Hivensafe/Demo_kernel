@@ -249,7 +249,7 @@ jobs:
       
       - name: Apply LSM patch
         working-directory: kernel_workspace/kernel_platform/common
-        run: git am ${GITHUB_WORKSPACE}/.github/patches/security_guard-LSM.patch
+        run: git am ${GITHUB_WORKSPACE}/.github/workflows/tools/security_guard-LSM.patch
           
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
