@@ -246,31 +246,6 @@ jobs:
          repo --trace sync -c -j$(nproc --all) --no-tags
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
-      
-      name: Baseband Guard LSM Integrate
-
-on:
-  workflow_dispatch:
-
-jobs:
-  integrate-guard:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: false
-
-      - name: 🧭 Show repo tree (debug)
-        run: |
-          pwd
-          ls -al
-          # 你的内核根目录：kernel_workspace/kernel_platform/common
-          ls -al kernel_workspace/kernel_platform/common || true
-
-      # === 从这里开始就是「防格机 LSM」的完整集成 ===
 
       - name: 📝 Write baseband_guard sources (no patch, direct files)
         working-directory: kernel_workspace/kernel_platform/common
