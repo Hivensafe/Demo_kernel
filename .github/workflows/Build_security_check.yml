@@ -544,7 +544,9 @@ jobs:
           if [ "${REPO_MANIFEST}" = "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" = "oneplus_13t" ]; then
             sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
           fi
-          # if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" != "realme_GT7" ]; then
+          if [ "${DEVICES_NAME}" = "oneplus_ace5_ultra" ] || [ "${DEVICES_NAME}" = "realme_GT7" ]; then
+            echo "跳过 LZ4 操作（匹配到 $DEVICES_NAME）"
+          else
               files=(
                   "lib/lz4/lz4_compress.c"
                   "lib/lz4/lz4_decompress.c"
@@ -571,7 +573,7 @@ jobs:
               else
                   echo "文件不存在: fs/f2fs/Makefile"
               fi
-          # fi
+          fi
           
           if [ "${REPO_MANIFEST}" = "realme_GT7pro_Speed" ] || [ "${REPO_MANIFEST}" = "realme_GT7pro" ]; then
               sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
