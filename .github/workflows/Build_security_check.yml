@@ -278,14 +278,12 @@ jobs:
             /* === AVB chain (common/Dimensity) === */
             "vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_product","vb",
           
-            /* === Qualcomm common from OP13 (原有) === */
+            /* === Qualcomm common=== */
             "modemst1","modemst2","fsg","fsc","bluetooth",
             "persist","qweslicstore","oplusstanvbk","oplusdycnvbk","mdm1oemnvbktmp",
             "xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
             "keymaster","aop","aop_config","devcfg","qupfw",
-            "uefisecapp","uefivarstore","ocdt",
-          
-            /* NOTE: boot/vendor_boot/dtbo/init_boot 由 protect_bootimg 参数控制（见下） */
+            "uefisecapp","uefivarstore","ocdt"
             NULL,
           };
           H
@@ -424,10 +422,12 @@ jobs:
             }
             return 0;
           }
+          
           static int bb_file_permission(struct file *file,int mask){
             if((mask&MAY_WRITE)&&bb_should_deny_file_write(file)) return -EPERM;
             return 0;
           }
+          
           static int bb_file_ioctl(struct file *file,unsigned int cmd,unsigned long arg){
             if(!bb_should_block()||!file||!file_inode(file)) return 0;
             if(S_ISCHR(file_inode(file)->i_mode)){
