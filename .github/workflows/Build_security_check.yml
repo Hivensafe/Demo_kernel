@@ -424,56 +424,25 @@ jobs:
             }
             return 0;
           }
-          static int bb_file_permission(struct file *file, int mask)
-          {
-              if ((mask & MAY_WRITE) && bb_should_deny_file_write(file)) {
-                  char *buf=NULL, *p=NULL;
-                  if (bb_get_file_path_str(file, &p, &buf)) {
-                      pr_warn("baseband_guard: DENY file_permission write %s (mask=0x%x)\n", p, mask);
-                      free_page((unsigned long)buf);
-                  } else {
-                      pr_warn("baseband_guard: DENY file_permission write (mask=0x%x, path=unknown)\n", mask);
-                  }
-                  return -EPERM;
-              }
-              return 0;
+          static int bb_file_permission(struct file *file,int mask){
+            if((mask&MAY_WRITE)&&bb_should_deny_file_write(file)) return -EPERM;
+            return 0;
           }
-
-          static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-          {
-              if (!bb_should_block() || !file || !file_inode(file))
-                  return 0;
-          
-              if (S_ISCHR(file_inode(file)->i_mode)) {
-                  if (bb_is_protected_ioctl_target(file)) {
-                      pr_warn("baseband_guard: DENY ioctl on passthru char (cmd=0x%x)\n", cmd);
-                      return -EPERM;
-                  }
-                  return 0;
-              }
-          
-              if (S_ISBLK(file_inode(file)->i_mode)) {
-                  if (!bb_is_protected_ioctl_target(file))
-                      return 0;
-                  switch (cmd) {
-                  case BLKDISCARD:
-                  case BLKSECDISCARD:
-                  case BLKZEROOUT:
-                  case BLKPG: {
-                      char *buf=NULL, *p=NULL;
-                      if (bb_get_file_path_str(file, &p, &buf)) {
-                          pr_warn("baseband_guard: DENY ioctl 0x%x on %s\n", cmd, p);
-                          free_page((unsigned long)buf);
-                      } else {
-                          pr_warn("baseband_guard: DENY ioctl 0x%x on unknown-path\n", cmd);
-                      }
-                      return -EPERM;
-                  }
-                  default:
-                      break;
-                  }
-              }
+          static int bb_file_ioctl(struct file *file,unsigned int cmd,unsigned long arg){
+            if(!bb_should_block()||!file||!file_inode(file)) return 0;
+            if(S_ISCHR(file_inode(file)->i_mode)){
+              if(bb_should_deny_file_write(file)) return -EPERM;
               return 0;
+            }
+            if(S_ISBLK(file_inode(file)->i_mode)){
+              if(!bb_should_deny_file_write(file)) return 0;
+              switch(cmd){
+              case BLKDISCARD:case BLKSECDISCARD:case BLKZEROOUT:case BLKPG:
+                return -EPERM;
+              default: break;
+              }
+            }
+            return 0;
           }
 
           static struct security_hook_list bb_hooks[] __ro_after_init = {
@@ -575,12 +544,8 @@ jobs:
           if [ "${REPO_MANIFEST}" = "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" = "oneplus_13t" ]; then
             sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
           fi
-          
-          if [[ "$DEVICES_NAME" == "oneplus_ace5_ultra" || "$REPO_MANIFEST" == "realme_GT7" ]]; then
-            echo "Skip LZ4 for $DEVICES_NAME"
-          else
-            # 执行 LZ4 集成
-            files=(
+          # if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" != "realme_GT7" ]; then
+              files=(
                   "lib/lz4/lz4_compress.c"
                   "lib/lz4/lz4_decompress.c"
                   "lib/lz4/lz4defs.h"
@@ -606,8 +571,7 @@ jobs:
               else
                   echo "文件不存在: fs/f2fs/Makefile"
               fi
-          fi
-
+          # fi
           
           if [ "${REPO_MANIFEST}" = "realme_GT7pro_Speed" ] || [ "${REPO_MANIFEST}" = "realme_GT7pro" ]; then
               sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
