@@ -283,7 +283,7 @@ jobs:
             "persist","qweslicstore","oplusstanvbk","oplusdycnvbk","mdm1oemnvbktmp",
             "xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
             "keymaster","aop","aop_config","devcfg","qupfw",
-            "uefisecapp","uefivarstore","ocdt"
+            "uefisecapp","uefivarstore","ocdt",
             NULL,
           };
           H
