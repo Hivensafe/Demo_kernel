@@ -254,16 +254,40 @@ jobs:
 
           # ---- header ----
           cat > security/baseband_guard_op13.h <<'H'
-          /* SPDX-License-Identifier: GPL-2.0 */
-          static const char * const protected_names[] = {
-            "modem","modemst1","modemst2","fsg","fsc","bluetooth",
-            "persist","qweslicstore","oplusstanvbk","oplusdycnvbk","mdm1oemnvbktmp",
-            "xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
-            "keymaster","aop","aop_config","devcfg","qupfw",
-            "vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_product",
-            "uefisecapp","uefivarstore",
-            NULL,
-          };
+            /* SPDX-License-Identifier: GPL-2.0 */
+            /* Superset list: Qualcomm + MediaTek Dimensity critical partitions.
+             * A/B 后缀由 LSM 自动匹配（_a/_b 无需重复书写）。
+             */
+            static const char * const protected_names[] = {
+              /* === Baseband / NV (Dimensity + common) === */
+              "modem","md_sec","nvram","nvdata","nvcfg",
+            
+              /* === Bootloader / secure firmware chain (Dimensity) === */
+              "preloader_raw","lk","tee","gz","rotfw","pvmfw",
+              "spmfw","sspm","scp","mcupm","dpm","bootloader1","bootloader2",
+            
+              /* === Connectivity firmwares (Dimensity) === */
+              "connsys_bt","connsys_wifi","connsys_gnss",
+            
+              /* === Multimedia / co-processors (Dimensity) === */
+              "apusys","gpueb","vcp","ccu","audio_dsp","mvpu_algo",
+            
+              /* === Device/rollback security info (Dimensity) === */
+              "proinfo","protect1","protect2","sec1","seccfg","frp","otp",
+            
+              /* === AVB chain (common/Dimensity) === */
+              "vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_product","vb",
+            
+              /* === Qualcomm common from OP13 (原有) === */
+              "modemst1","modemst2","fsg","fsc","bluetooth",
+              "persist","qweslicstore","oplusstanvbk","oplusdycnvbk","mdm1oemnvbktmp",
+              "xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
+              "keymaster","aop","aop_config","devcfg","qupfw",
+              "uefisecapp","uefivarstore",
+            
+              /* NOTE: boot/vendor_boot/dtbo/init_boot 由 protect_bootimg 参数控制（见下） */
+              NULL,
+            };
           H
 
           # ---- source ----
@@ -308,7 +332,7 @@ jobs:
           #include "baseband_guard_op13.h"
 
           static const char * const bootimg_names[] = {
-            "boot","vendor_boot","dtbo",NULL,
+            "boot","vendor_boot","dtbo","init_boot",NULL,
           };
 
           extern char *saved_command_line;
