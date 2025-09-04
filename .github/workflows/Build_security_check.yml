@@ -283,7 +283,7 @@ jobs:
             "persist","qweslicstore","oplusstanvbk","oplusdycnvbk","mdm1oemnvbktmp",
             "xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
             "keymaster","aop","aop_config","devcfg","qupfw",
-            "uefisecapp","uefivarstore",
+            "uefisecapp","uefivarstore","ocdt",
           
             /* NOTE: boot/vendor_boot/dtbo/init_boot 由 protect_bootimg 参数控制（见下） */
             NULL,
