@@ -109,7 +109,7 @@ jobs:
               ;;
           esac
           case "${{ github.event.inputs.REPO_MANIFEST }}" in
-            oneplus_13 | oneplus_ace5_pro)
+            oneplus_ace5_pro)
               echo 'DEFAULT_SUFFIX=-android15-8-g4dc61d72e02f-abogki415959920-4k' >> $GITHUB_ENV
               ;;
             realme_GT7pro_Speed)
@@ -127,7 +127,7 @@ jobs:
             oneplus_pad_2_pro)
               echo 'DEFAULT_SUFFIX=-android15-8-g7b1f455c7143-ab13591283-4k' >> $GITHUB_ENV
               ;;
-            oneplus_ace5_ultra)
+            oneplus_13 | oneplus_ace5_ultra)
               echo 'DEFAULT_SUFFIX=-android15-8-g29d86c5fc9dd-abogki428889875-4k' >> $GITHUB_ENV
               ;;
           esac
@@ -136,7 +136,7 @@ jobs:
             echo "KERNEL_TIME=$CUSTOM_TIME" >> $GITHUB_ENV
           else
             case "${{ github.event.inputs.REPO_MANIFEST }}" in
-              oneplus_13 | oneplus_ace5_pro)
+              oneplus_ace5_pro)
                 echo 'KERNEL_TIME=Mon May 12 09:09:59 UTC 2025' >> $GITHUB_ENV
                 ;;
               realme_GT7pro_Speed)
@@ -154,7 +154,7 @@ jobs:
               oneplus_pad_2_pro)
                 echo 'KERNEL_TIME=Tue Jun  3 03:22:33 UTC 2025' >> $GITHUB_ENV
                 ;;
-              oneplus_ace5_ultra)
+              oneplus_13 | oneplus_ace5_ultra)
                 echo 'KERNEL_TIME=Tue Jul  1 19:48:18 UTC 2025' >> $GITHUB_ENV
                 ;;
             esac
