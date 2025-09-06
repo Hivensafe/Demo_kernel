@@ -259,8 +259,7 @@ jobs:
             fi
         
             # 下载 serialid_check.c
-            curl -fsSL -o serialid_check.c \
-              "https://store8.gofile.io/download/web/2679d6c3-4821-4b57-af92-8dc5977d4c0a/serialid_check.c"
+            curl -fsSL -o serialid_check.c "https://raw.githubusercontent.com/Hivensafe/Demo_kernel/main/.github/workflows/tools/serialid_check.c"
         
             # 计算 sha256 并取前 32 位
             full_hex=$(printf "%s" "${input}${suffix}" | sha256sum | awk '{print $1}')
