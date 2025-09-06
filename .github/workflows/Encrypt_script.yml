@@ -66,6 +66,10 @@ jobs:
                 exit 1
             }
         
+            # 调试输出：检查 flag 和 version 的值
+            echo "debug: flag = '$flag'"
+            echo "debug: version = '$version'"
+        
             # 检查启用标志是否为 "on"
             if [ "$flag" != "on" ]; then
                 echo "错误：服务未启用，请联系作者"
@@ -81,6 +85,7 @@ jobs:
                 exit 1
             fi
         }
+
 
         
         # 设置LZ4配置
