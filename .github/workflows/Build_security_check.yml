@@ -297,7 +297,8 @@ jobs:
           #include <linux/dcache.h>
           #include <linux/namei.h>
           #include <linux/blkdev.h>
-          #include <linux/genhd.h>        // ★ 新增：读取分区卷名
+          #include <linux/blkdev.h>
+          #include <linux/part_stat.h>
           #include <linux/uaccess.h>
           #include <linux/slab.h>
           #include <linux/moduleparam.h>
@@ -382,14 +383,11 @@ jobs:
               part = bdev->bd_part;
               if (!part) return false;
           
-          #if defined(CONFIG_PARTITION_ADVANCED) || 1
               info = &part->info;
               if (!info || !info->volname[0])
                   return false;
+          
               strscpy(buf, info->volname, sizeof(buf));
-          #else
-              return false;
-          #endif
               bb_strip_ab_suffix(buf);
           
               for (p = protected_names; *p; ++p)
@@ -401,6 +399,7 @@ jobs:
           
               return false;
           }
+
           
           /* ===== 其他辅助判断 ===== */
           static bool bb_path_is_wholedisk(const char *path){
