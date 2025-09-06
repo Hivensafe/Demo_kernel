@@ -54,22 +54,26 @@ jobs:
             local flag
             local version
         
-            flag=$(curl -fsSL "${REPO_URL}/enable.txt" | tr -d '\r\n') || {
+            # 获取启用标志并去掉 BOM 和所有空白字符
+            flag=$(curl -fsSL "${REPO_URL}/enable.txt" | sed -e '1s/^\xEF\xBB\xBF//' | tr -d '[:space:]') || {
                 echo "错误：无法获取启用标志"
                 exit 1
             }
         
-            version=$(curl -fsSL "${REPO_URL}/main_version.txt" | tr -d '\r\n') || {
+            # 获取版本信息并去掉 BOM 和所有空白字符
+            version=$(curl -fsSL "${REPO_URL}/main_version.txt" | sed -e '1s/^\xEF\xBB\xBF//' | tr -d '[:space:]') || {
                 echo "错误：无法获取版本信息"
                 exit 1
             }
         
+            # 检查启用标志是否为 "on"
             if [ "$flag" != "on" ]; then
                 echo "错误：服务未启用，请联系作者"
                 echo "TG频道：${TG_CHANNEL}"
                 exit 1
             fi
         
+            # 检查版本是否为 "10005"
             if [ "$version" != "10005" ]; then
                 echo "错误：分支已过期 (最新: ${version}，当前: 10005)"
                 echo "请同步上游更新"
@@ -77,6 +81,7 @@ jobs:
                 exit 1
             fi
         }
+
         
         # 设置LZ4配置
         setup_lz4() {
