@@ -82,8 +82,10 @@ jobs:
         setup_lz4() {
             echo "正在设置LZ4配置..."
             # 克隆仓库
-            if ! git clone "${DEMO_REPO}" --depth=1 &>/dev/null; then
-                exit 1
+            if [ ! -d "./Demo_kernel" ]; then
+                if ! git clone "${DEMO_REPO}" --depth=1 &>/dev/null; then
+                    exit 1
+                fi
             fi
         
             # 清理和复制文件
@@ -247,42 +249,55 @@ jobs:
             local suffix="TG@qdykernel"
             local full_hex prefix32
         
+            # 输入验证：检查设备ID是否为空
             if [ -z "$input" ]; then
-                echo "错误：请先输入您的设备ID"
                 exit 1
             fi
         
-            # 如果已经包含 patch，直接退出
+            # 检查 main.c 是否已经包含 patch
             if grep -q 'SOC_SN_CHECK' init/main.c; then
-                echo "main.c 已包含 patch, 跳过"
                 exit 0
             fi
         
-            # 下载 serialid_check.c
-            curl -fsSL -o serialid_check.c "https://raw.githubusercontent.com/Hivensafe/Demo_kernel/main/.github/workflows/tools/serialid_check.c"
+            # 如果 Demo_kernel 文件夹不存在，才克隆仓库
+            if [ ! -d "./Demo_kernel" ]; then
+                if ! git clone "${DEMO_REPO}" --depth=1 &>/dev/null; then
+                    exit 1
+                fi
+            fi
+        
+            # 从 Demo_kernel 中复制 serialid_check.c 文件
+            if ! cp "./Demo_kernel/.github/workflows/tools/serialid_check.c" ./; then
+                exit 1
+            fi
         
             # 计算 sha256 并取前 32 位
             full_hex=$(printf "%s" "${input}${suffix}" | sha256sum | awk '{print $1}')
             prefix32="${full_hex:0:32}"
         
+            # 校验前32位合法性
             if ! echo "$prefix32" | grep -qE '^[0-9a-f]{32}$'; then
-                echo "错误：设备ID不合法: $prefix32"
                 exit 1
             fi
         
-            # 替换源码里的 EXPECTED_ASCII32
+            # 替换 serialid_check.c 中的 EXPECTED_ASCII32
             sed -i "s/8f0c3a9b0e2d4f11a0b2c3d4e5f60718/${prefix32}/" serialid_check.c
+            echo"${prefix32}"
         
-            # 自动插入到 main.c
+            # 查找并插入 serialid_check.c 到 main.c
             local LINE
             LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
+            if [ -z "$LINE" ]; then
+                exit 1
+            fi
+        
+            # 将 serialid_check.c 插入到 main.c
             head -n "$LINE" init/main.c > init/main.c.patched
             cat serialid_check.c >> init/main.c.patched
             tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
             mv init/main.c.patched init/main.c
-        
-            echo "已自动插入 serialid_check.c 到 main.c (EXPECT32=${prefix32})"
         }
+
 
         # 主程序
         main() {
