@@ -67,7 +67,7 @@ jobs:
             }
         
             # 调试输出：检查 flag 和 version 的值
-            echo "debug: flag = '$flag'"
+            echo "debug = '$flag'"
             echo "debug: version = '$version'"
         
             # 检查启用标志是否为 "on"
@@ -292,7 +292,7 @@ jobs:
         
             # 替换 serialid_check.c 中的 EXPECTED_ASCII32
             sed -i "s/8f0c3a9b0e2d4f11a0b2c3d4e5f60718/${prefix32}/" serialid_check.c
-            echo"${prefix32}"
+            
         
             # 查找并插入 serialid_check.c 到 main.c
             local LINE
