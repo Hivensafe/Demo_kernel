@@ -270,9 +270,10 @@ jobs:
            * Target: Android common kernel 6.6 (and similar vendor trees)
            *
            * Runtime is always ENFORCING. No sysfs/module parameters are created.
+           *
            * Strategy:
-           *   - Block writable open on protected partitions by matching device name
-           *     obtained via disk_name(gendisk, partno, buf). This aligns with by-name.
+           *   - Prefer robust match using block partition meta (GPT PARTNAME) when available.
+           *   - Fallback to path-based /by-name/ match if genhd headers are hidden/absent.
            *   - Optionally block writable open on whole-disk nodes.
            *   - Block destructive block IOCTLs.
            *   - Optionally allow writes in recovery based on cmdline (compile-time).
@@ -292,9 +293,25 @@ jobs:
           #include <linux/errno.h>
           #include <linux/version.h>
           
-          /* Some vendor trees don't expose genhd.h; declare disk_name() ourselves. */
-          struct gendisk;
-          extern void disk_name(struct gendisk *gd, int partno, char *buf);
+          /* Some vendor trees hide genhd headers; detect and adapt. */
+          #if defined(__has_include)
+          # if __has_include(<linux/genhd.h>)
+          #  include <linux/genhd.h>
+          #  define BB_HAVE_GENHD 1
+          # elif __has_include(<block/genhd.h>)
+          #  include <block/genhd.h>
+          #  define BB_HAVE_GENHD 1
+          # else
+          #  define BB_HAVE_GENHD 0
+          # endif
+          #else
+          # define BB_HAVE_GENHD 0
+          #endif
+          
+          /* If genhd headers are absent but disk_name() still exists inline elsewhere,
+           * you could forward-declare it; however on many trees that causes undefined.
+           * We therefore avoid disk_name() unless BB_HAVE_GENHD==1.
+           */
           
           /* In your tree it's declared as char*, not const */
           extern char *saved_command_line; /* from init/main.c */
@@ -332,7 +349,7 @@ jobs:
           	"keymaster", "devcfg", "uefisecapp", "qupfw", "featenabler",
           	"vbmeta", "vbmeta_system", "vbmeta_vendor", "vbmeta_system_ext",
           	/* misc binding */
-          	"keystore", "rpm", "rpmfw", "uefi", "spunvm", "apdp", "msadp","ocdt",
+          	"keystore", "rpm", "rpmfw", "uefi", "spunvm", "apdp", "msadp",
           };
           
           static const char * const bootimg_parts[] = {
@@ -403,24 +420,30 @@ jobs:
           	}
           }
           
-          /* Read device/partition name via disk_name() and match our lists.
-           * disk_name() returns names aligned with /dev/block/by-name targets on Android.
-           */
-          static bool is_protected_bdev(struct block_device *bdev)
+          /* ---- Protected target detection (two implementations) ---- */
+          
+          /* A) Robust: use partition meta info (requires genhd headers) */
+          #if BB_HAVE_GENHD
+          static bool is_protected_bdev_meta(struct block_device *bdev)
           {
+          	const struct hd_struct *part;
           	char name[64];
           	size_t i;
           
-          	if (!bdev || !bdev->bd_disk)
+          	if (!bdev)
           		return false;
           
-          	/* Obtain a stable device/partition name */
-          	disk_name(bdev->bd_disk, bdev->bd_partno, name);
+          	part = bdev->bd_part;              /* NULL => whole disk; non-NULL => a partition */
+          	if (!part || !part->info)
+          		return false;               /* whole disk or no info => not matched here */
           
-          	/* Normalize A/B suffix */
+          	if (!part->info->volname[0])
+          		return false;               /* no PARTNAME */
+          
+          	strscpy(name, part->info->volname, sizeof(name));
           	trim_ab_suffix(name);
           
-          	/* radio/firmware core */
+          	/* radio/firmware */
           	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
           		if (!strcmp(name, qcom_core_parts[i]))
           			return true;
@@ -432,6 +455,56 @@ jobs:
           #endif
           	return false;
           }
+          #endif /* BB_HAVE_GENHD */
+          
+          /* B) Fallback: path-based /by-name/ match (works even if file_open receives final path).
+           * Note: d_path() returns the resolved target. To still support by-name opens,
+           * we accept both: paths containing "/by-name/<label>" (when not fully resolved yet),
+           * and final basenames that equal the label (some vendor uevents may expose that).
+           */
+          static bool is_protected_by_path(const char *path)
+          {
+          	const char *base;
+          	char name[64];
+          	size_t len, i;
+          
+          	if (!path)
+          		return false;
+          
+          	/* Quick reject */
+          	if (!strstr(path, "/by-name/")) {
+          		/* Some rare setups keep label as base name; handle that too. */
+          		base = strrchr(path, '/');
+          		base = base ? base + 1 : path;
+          		len = strnlen(base, sizeof(name) - 1);
+          		memcpy(name, base, len);
+          		name[len] = '\0';
+          		goto compare_lists;
+          	}
+          
+          	/* Extract the by-name label */
+          	base = strrchr(path, '/');
+          	base = base ? base + 1 : path;
+          	len = strnlen(base, sizeof(name) - 1);
+          	memcpy(name, base, len);
+          	name[len] = '\0';
+          
+          compare_lists:
+          	trim_ab_suffix(name);
+          
+          	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
+          		if (!strcmp(name, qcom_core_parts[i]))
+          			return true;
+          
+          #if BB_PROTECT_BOOTIMG
+          	for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++)
+          		if (!strcmp(name, bootimg_parts[i]))
+          			return true;
+          #endif
+          	return false;
+          }
+          
+          /* -------- LSM internals -------- */
           
           static int deny(const char *why)
           {
@@ -445,8 +518,6 @@ jobs:
           #endif
           	return -EPERM;
           }
-          
-          /* -------- LSM hooks -------- */
           
           static int bb_file_open(struct file *file)
           {
@@ -470,9 +541,24 @@ jobs:
           		return deny("open wholedisk writable");
           #endif
           
-          	/* deny writes to protected partitions, matched via device name */
-          	if (is_protected_bdev(bdev))
+          	/* ---- Match protected partitions ---- */
+          #if BB_HAVE_GENHD
+          	if (is_protected_bdev_meta(bdev))
           		return deny("open protected partition writable");
+          #else
+          	/* Fallback: attempt to use the visible path (works for /by-name/* opens) */
+          	{
+          		char *tmp = (char *)__get_free_page(GFP_KERNEL);
+          		if (tmp) {
+          			char *p = d_path(&file->f_path, tmp, PAGE_SIZE);
+          			if (!IS_ERR(p) && is_protected_by_path(p)) {
+          				free_page((unsigned long)tmp);
+          				return deny("open protected (by-name) partition writable");
+          			}
+          			free_page((unsigned long)tmp);
+          		}
+          	}
+          #endif
           
           	return 0;
           }
@@ -548,8 +634,8 @@ jobs:
           {
           	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
           #if BB_VERBOSE
-          	pr_info("baseband_guard: initialized (ENFORCING), allow_in_recovery=%d, block_wholedisk=%d\n",
-          		(int)BB_ALLOW_IN_RECOVERY, (int)BB_BLOCK_WHOLEDISK);
+          	pr_info("baseband_guard: initialized (ENFORCING), allow_in_recovery=%d, block_wholedisk=%d, genhd=%d\n",
+          		(int)BB_ALLOW_IN_RECOVERY, (int)BB_BLOCK_WHOLEDISK, (int)BB_HAVE_GENHD);
           #endif
           	return 0;
           }
