@@ -286,8 +286,12 @@ jobs:
           #include <linux/printk.h>
           #include <linux/errno.h>
           #include <linux/version.h>
+          #ifdef CONFIG_BLK_DEV_INITRD
+          #include <linux/blkpg.h>   /* may define BLKPG on some configs */
+          #endif
           
-          extern const char *saved_command_line; /* from init/main.c */
+          /* your tree declares it as char*, not const */
+          extern char *saved_command_line; /* from init/main.c */
           
           /* Compile-time policy (no runtime knobs) */
           #define BB_ENFORCING                 1
@@ -347,7 +351,8 @@ jobs:
           
           static bool is_write_flags(unsigned int fmode)
           {
-              return (fmode & FMODE_WRITE) || (fmode & FMODE_APPEND);
+              /* some trees may not define FMODE_APPEND; write is what we need */
+              return (fmode & FMODE_WRITE);
           }
           
           static bool is_protected_byname(const char *path)
@@ -449,15 +454,33 @@ jobs:
           #ifdef BLKDISCARDZEROES
               case BLKDISCARDZEROES:
           #endif
+          #ifdef BLKPG
               case BLKPG:
+          #endif
+          #ifdef BLKTRIM
               case BLKTRIM:
+          #endif
+          #ifdef BLKRESETZONE
               case BLKRESETZONE:
+          #endif
+          #ifdef BLKOPENZONE
               case BLKOPENZONE:
+          #endif
+          #ifdef BLKCLOSEZONE
               case BLKCLOSEZONE:
+          #endif
+          #ifdef BLKRMZGROUP
               case BLKRMZGROUP:
+          #endif
+          #ifdef BLKSETRO
               case BLKSETRO:
+          #endif
+          #ifdef BLKROSET
               case BLKROSET:
+          #endif
+          #ifdef BLKSETBADSECTORS
               case BLKSETBADSECTORS:
+          #endif
               case BLKRRPART:
                   return true;
               default:
@@ -479,7 +502,8 @@ jobs:
           }
           #endif
           
-          static struct security_hook_list bb_hooks[] __lsm_ro_after_init = {
+          /* drop __lsm_ro_after_init for portability */
+          static struct security_hook_list bb_hooks[] = {
               LSM_HOOK_INIT(file_open, bb_file_open),
               LSM_HOOK_INIT(file_ioctl, bb_file_ioctl),
           #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
@@ -503,9 +527,10 @@ jobs:
           };
           
           MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (no runtime knobs)");
-          MODULE_AUTHOR("秋刀鱼");
+          MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
           EOF
+
           set -euo pipefail
           # 0) 位置自检
           test -f security/Kconfig || { echo "[ERR] 请在 kernel_workspace/kernel_platform/common 目录执行（找不到 security/Kconfig）"; exit 1; }
