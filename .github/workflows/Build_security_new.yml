@@ -266,16 +266,8 @@ jobs:
           cat > security/baseband_guard.c <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           /*
-           * baseband_guard: LSM to protect critical baseband/bootloader partitions
-           * Strategy (no genhd.h dependencies):
-           *   - After boot, delay then walk a fixed allowlist of partition names (and _a/_b),
-           *     resolve /dev/block/by-name/<part> symlinks to real block devices,
-           *     record their dev_t (major:minor) into a kernel hashtable.
-           *   - On file_open, if a block device is opened writable and its i_rdev is in
-           *     the protected set => deny with -EPERM.
-           *   - Optionally block whole-disk nodes (physical only: sd*, mmcblk*, nvme*).
-           *
-           * Runtime is always ENFORCING. No /sys/module parameters are created.
+           * baseband_guard: Minimal LSM to deny writes to critical baseband/bootloader partitions
+           * No timers, no directory walks, no genhd.h. One-time on-demand resolution via lookup_bdev.
            */
           
           #include <linux/module.h>
@@ -284,94 +276,66 @@ jobs:
           #include <linux/lsm_hooks.h>
           #include <linux/fs.h>
           #include <linux/namei.h>
-          #include <linux/path.h>
-          #include <linux/dcache.h>
           #include <linux/blkdev.h>
           #include <linux/blk_types.h>
-          #include <linux/cred.h>
-          #include <linux/limits.h>
-          #include <linux/string.h>
-          #include <linux/printk.h>
-          #include <linux/errno.h>
-          #include <linux/version.h>
           #include <linux/slab.h>
           #include <linux/hashtable.h>
+          #include <linux/string.h>
           #include <linux/uaccess.h>
-          #include <linux/workqueue.h>
+          #include <linux/errno.h>
+          #include <linux/version.h>
           
           extern char *saved_command_line; /* from init/main.c */
           
-          /* ===== Compile-time policy (no runtime knobs) ===== */
-          #define BB_ENFORCING                 1
+          #define BB_ENFORCING 1
           
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY
-          #define BB_ALLOW_IN_RECOVERY         1
+          #define BB_ALLOW_IN_RECOVERY 1
           #else
-          #define BB_ALLOW_IN_RECOVERY         0
+          #define BB_ALLOW_IN_RECOVERY 0
           #endif
           
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG
-          #define BB_PROTECT_BOOTIMG           1
+          #define BB_PROTECT_BOOTIMG 1
           #else
-          #define BB_PROTECT_BOOTIMG           0
-          #endif
-          
-          #ifdef CONFIG_SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK
-          #define BB_BLOCK_WHOLEDISK           1
-          #else
-          #define BB_BLOCK_WHOLEDISK           0
+          #define BB_PROTECT_BOOTIMG 0
           #endif
           
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE
-          #define BB_VERBOSE                   1
+          #define BB_VERBOSE 1
           #else
-          #define BB_VERBOSE                   0
+          #define BB_VERBOSE 0
           #endif
           
-          /* ===== Delayed scan config ===== */
-          #define BBG_SCAN_DELAY_MS      60000   /* 首次延迟：60s */
-          #define BBG_SCAN_RETRY_MS       5000   /* 失败重试间隔：5s */
-          #define BBG_SCAN_MAX_RETRY        20   /* 最多重试 20 次（共 ~100s） */
+          /* === configuration === */
+          #define BB_BYNAME_DIR "/dev/block/by-name"
           
-          /* ===== Constants ===== */
-          #define BB_BYNAME_DIR   "/dev/block/by-name"
-          
-          /* Common Qualcomm/Android sensitive partitions */
+          /* 受保护分区名（可按需增减） */
           static const char * const qcom_core_parts[] = {
-          	/* baseband + calibration */
-          	"modem","modemst1","modemst2","fsg","fsc","bluetooth",
-          	"dsp","cdsp","qweslicstore","qweslicstorebak",
-          	/* boot chain / firmware */
+          	"modem","modemst1","modemst2","fsg","fsc",
           	"xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
           	"keymaster","devcfg","uefisecapp","qupfw","featenabler",
           	"vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_system_ext",
-          	/* misc binding */
-          	"keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp",
+          	"bluetooth","dsp","cdsp","keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp",
           };
           
+          #if BB_PROTECT_BOOTIMG
           static const char * const bootimg_parts[] = {
           	"boot","dtbo","vendor_boot","init_boot","recovery"
           };
+          #endif
           
-          /* Whole-disk name prefixes (PHYSICAL ONLY; do NOT include "dm-") */
-          static const char * const wholedisk_prefixes[] = { "sd", "mmcblk", "nvme" };
-          
-          /* ===== Protected device set: hash of dev_t ===== */
+          /* === tiny cache of protected dev_t === */
           struct bbg_node { dev_t dev; struct hlist_node h; };
-          DEFINE_HASHTABLE(bbg_protected_devs, 8); /* 256 buckets */
+          DEFINE_HASHTABLE(bbg_protected_devs, 7); /* 128 buckets足够 */
+          static bool bbg_cache_built; /* 一次性构建标志 */
           
-          /* ===== Helpers ===== */
+          /* === helpers === */
           static bool in_recovery_mode(void)
           {
           #if BB_ALLOW_IN_RECOVERY
-          	if (!saved_command_line)
-          		return false;
-          	if (strstr(saved_command_line, "androidboot.mode=recovery"))
-          		return true;
-          	/* Some vendor trees mark recovery differently */
-          	if (strstr(saved_command_line, "skip_initramfs=1") &&
-          	    strstr(saved_command_line, "recovery"))
-          		return true;
+          	if (!saved_command_line) return false;
+          	if (strstr(saved_command_line, "androidboot.mode=recovery")) return true;
           #endif
           	return false;
           }
@@ -380,286 +344,198 @@ jobs:
           {
           	if (!file) return false;
           	if (file->f_mode & FMODE_WRITE) return true;
-          	/* Fallback: check userspace flags too */
           	return ((file->f_flags & O_ACCMODE) != O_RDONLY);
           }
           
-          static bool is_wholedisk(struct block_device *bdev)
+          static bool cache_has(dev_t dev)
           {
-          	size_t i;
-          	const char *dn;
-          
-          	if (!bdev || !bdev->bd_disk)
-          		return false;
-          	dn = bdev->bd_disk->disk_name;
-          	if (!dn)
-          		return false;
-          
-          	for (i = 0; i < ARRAY_SIZE(wholedisk_prefixes); i++) {
-          		size_t p = strlen(wholedisk_prefixes[i]);
-          		/* prefix match: "sd", "mmcblk", "nvme" */
-          		if (!strncmp(dn, wholedisk_prefixes[i], p))
-          			return true;
-          	}
+          	struct bbg_node *p;
+          	hash_for_each_possible(bbg_protected_devs, p, h, (u64)dev)
+          		if (p->dev == dev) return true;
           	return false;
           }
           
-          static void bbg_protect_dev(dev_t dev)
+          static void cache_add(dev_t dev)
           {
           	struct bbg_node *n;
-          
-          	/* Skip zero dev_t just in case */
-          	if (!dev)
-          		return;
-          
-          	/* avoid duplicates (cheap check) */
-          	{
-          		struct bbg_node *cur;
-          		hash_for_each_possible(bbg_protected_devs, cur, h, (u64)dev) {
-          			if (cur->dev == dev)
-          				return;
-          		}
-          	}
-          
+          	if (!dev || cache_has(dev)) return;
           	n = kmalloc(sizeof(*n), GFP_KERNEL);
-          	if (!n)
-          		return;
+          	if (!n) return;
           	n->dev = dev;
           	hash_add(bbg_protected_devs, &n->h, (u64)dev);
-          
           #if BB_VERBOSE
           	pr_info("baseband_guard: protect dev %u:%u\n", MAJOR(dev), MINOR(dev));
           #endif
           }
           
-          static bool bbg_is_protected_dev(dev_t dev)
-          {
-          	struct bbg_node *cur;
-          	hash_for_each_possible(bbg_protected_devs, cur, h, (u64)dev) {
-          		if (cur->dev == dev) return true;
-          	}
-          	return false;
-          }
-          
-          static int deny(const char *why)
-          {
-          	if (!BB_ENFORCING)
-          		return 0;
-          	if (BB_ALLOW_IN_RECOVERY && in_recovery_mode())
-          		return 0;
-          #if BB_VERBOSE
-          	pr_info("baseband_guard: deny %s pid=%d comm=%s\n",
-          		why, current->pid, current->comm);
-          #endif
-          	return -EPERM;
-          }
-          
-          /* ===== by-name scanning (resolve symlinks and collect dev_t) ===== */
-          
-          static int bbg_try_add_one(const char *name)
+          /* 解析 /dev/block/by-name/<name> 为 dev_t（仅在第一次需要时调用） */
+          static bool resolve_byname_dev(const char *name, dev_t *out)
           {
           	char *path;
-          	struct path p;
-          	struct inode *inode;
-          	int ret;
+          	struct block_device *bdev;
+          	bool ok = false;
           
-          	/* Build /dev/block/by-name/<name> on heap to avoid large stack frame */
           	path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
-          	if (!path)
-          		return -ENOMEM;
+          	if (!path) return false;
           
-          	ret = kern_path(path, LOOKUP_FOLLOW, &p);
+          	/* lookup_bdev -> struct block_device* （会跟随 symlink 到真实块设备） */
+          	bdev = lookup_bdev(path);
           	kfree(path);
-          	if (ret)
-          		return ret;
+          	if (IS_ERR(bdev))
+          		return false;
           
-          	inode = d_backing_inode(p.dentry);
-          	if (inode && S_ISBLK(inode->i_mode)) {
-          		bbg_protect_dev(inode->i_rdev);
-          #if BB_VERBOSE
-          		pr_info("baseband_guard: protect dev %u:%u for %s\n",
-          			MAJOR(inode->i_rdev), MINOR(inode->i_rdev), name);
-          #endif
-          	}
-          	path_put(&p);
-          	return 0;
+          	/* 注意：lookup_bdev() 增加了引用，需要 bdput() */
+          	*out = bdev->bd_dev; /* dev_t */
+          	ok = true;
+          	bdput(bdev);
+          	return ok;
           }
           
-          static void bbg_scan_byname_fixedlist(void)
+          /* 从 cmdline 读取当前槽位后缀（_a/_b），减少解析次数 */
+          static const char *slot_suffix_from_cmdline(void)
           {
-          	size_t i;
+          	const char *p = saved_command_line;
+          	if (!p) return NULL;
+          	p = strstr(p, "androidboot.slot_suffix=");
+          	if (!p) return NULL;
+          	p += strlen("androidboot.slot_suffix=");
+          	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b') && (p[2] == 0 || p[2] == ' ')) {
+          		return (p[1] == 'a') ? "_a" : "_b";
+          	}
+          	return NULL;
+          }
           
-          	/* Core partitions */
+          /* 一次性构建缓存：仅在第一次“写打开”任意块设备时执行；不遍历目录，只解析少数固定名 */
+          static void build_cache_once(void)
+          {
+          	const char *suf = slot_suffix_from_cmdline(); /* 可能是 "_a"/"_b"/NULL */
+          	size_t i; dev_t dev;
+          	if (READ_ONCE(bbg_cache_built))
+          		return;
+          
+          	/* core parts */
           	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++) {
           		const char *n = qcom_core_parts[i];
-          		/* base name */
-          		bbg_try_add_one(n);
-          		/* A/B slots */
-          		{
-          			char buf[64];
-          			if (snprintf(buf, sizeof(buf), "%s_a", n) < sizeof(buf))
-          				bbg_try_add_one(buf);
-          			if (snprintf(buf, sizeof(buf), "%s_b", n) < sizeof(buf))
-          				bbg_try_add_one(buf);
+          		/* 基本名 */
+          		if (resolve_byname_dev(n, &dev)) cache_add(dev);
+          		/* A/B 槽：优先解析当前槽位，失败再解析另一槽 */
+          		if (suf) {
+          			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
+          			if (nm) {
+          				if (resolve_byname_dev(nm, &dev)) cache_add(dev);
+          				kfree(nm);
+          			}
+          		} else {
+          			char *na = kasprintf(GFP_KERNEL, "%s_a", n);
+          			char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
+          			if (na) { if (resolve_byname_dev(na, &dev)) cache_add(dev); kfree(na); }
+          			if (nb) { if (resolve_byname_dev(nb, &dev)) cache_add(dev); kfree(nb); }
           		}
           	}
           
           #if BB_PROTECT_BOOTIMG
           	for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++) {
           		const char *n = bootimg_parts[i];
-          		bbg_try_add_one(n);
-          		{
-          			char buf[64];
-          			if (snprintf(buf, sizeof(buf), "%s_a", n) < sizeof(buf))
-          				bbg_try_add_one(buf);
-          			if (snprintf(buf, sizeof(buf), "%s_b", n) < sizeof(buf))
-          				bbg_try_add_one(buf);
+          		if (resolve_byname_dev(n, &dev)) cache_add(dev);
+          		if (suf) {
+          			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
+          			if (nm) {
+          				if (resolve_byname_dev(nm, &dev)) cache_add(dev);
+          				kfree(nm);
+          			}
+          		} else {
+          			char *na = kasprintf(GFP_KERNEL, "%s_a", n);
+          			char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
+          			if (na) { if (resolve_byname_dev(na, &dev)) cache_add(dev); kfree(na); }
+          			if (nb) { if (resolve_byname_dev(nb, &dev)) cache_add(dev); kfree(nb); }
           		}
           	}
           #endif
-          }
           
-          /* ===== Delayed scan control (failure-only retry) ===== */
-          static struct delayed_work bbg_scan_work;
-          static atomic_t bbg_scan_done = ATOMIC_INIT(0);
-          static int bbg_scan_retries;
-          
-          static int bbg_protected_count(void)
-          {
-          	struct bbg_node *cur; unsigned bkt; int n = 0;
-          	hash_for_each(bbg_protected_devs, bkt, cur, h) n++;
-          	return n;
-          }
-          
-          static void bbg_scan_worker(struct work_struct *ws)
-          {
-          	int before = bbg_protected_count();
-          	bbg_scan_byname_fixedlist();
-          	if (bbg_protected_count() > before) {
-          		atomic_set(&bbg_scan_done, 1);
+          	WRITE_ONCE(bbg_cache_built, true);
           #if BB_VERBOSE
-          		pr_info("baseband_guard: scan OK, protected=%d\n", bbg_protected_count());
-          #endif
-          	} else if (++bbg_scan_retries < BBG_SCAN_MAX_RETRY) {
-          		schedule_delayed_work(&bbg_scan_work, msecs_to_jiffies(BBG_SCAN_RETRY_MS));
-          #if BB_VERBOSE
-          		pr_info("baseband_guard: scan retry %d (by-name not ready?)\n", bbg_scan_retries);
-          #endif
-          	} else {
-          		atomic_set(&bbg_scan_done, 1);
-          #if BB_VERBOSE
-          		pr_info("baseband_guard: scan give up, protected=%d\n", bbg_protected_count());
-          #endif
-          	}
-          }
-          
-          /* ===== LSM hooks ===== */
-          
-          static int bb_file_open(struct file *file)
-          {
-          	struct inode *inode;
-          	struct block_device *bdev;
-          
-          	if (!file)
-          		return 0;
-          
-          	inode = file_inode(file);
-          
-          	/* Only care about block devices opened writable */
-          	if (!S_ISBLK(inode->i_mode) || !is_write_open(file))
-          		return 0;
-          
-          	bdev = I_BDEV(inode);
-          
-          #if BB_BLOCK_WHOLEDISK
-          	/* Block raw whole-disk nodes (physical only) */
-          	if (is_wholedisk(bdev))
-          		return deny("open wholedisk writable");
-          #endif
-          
-          	/* Deny protected partitions by dev_t set */
-          	if (bbg_is_protected_dev(inode->i_rdev))
-          		return deny("open protected partition writable");
-          
-          #if BB_VERBOSE
-          	/* Debug breadcrumb (can be removed later) */
           	{
-          		const char *dn = (bdev && bdev->bd_disk) ? bdev->bd_disk->disk_name : "?";
-          		pr_info("baseband_guard: pass blk open fmode=%x flags=%x disk=%s dev=%u:%u\n",
-          			file->f_mode, file->f_flags, dn,
-          			MAJOR(inode->i_rdev), MINOR(inode->i_rdev));
+          		int cnt = 0; unsigned bkt; struct bbg_node *p;
+          		hash_for_each(bbg_protected_devs, bkt, p, h) cnt++;
+          		pr_info("baseband_guard: cache built, protected=%d\n", cnt);
           	}
           #endif
-          	return 0;
           }
           
-          /* Limit destructive ioctls only on protected partitions or physical whole disks */
+          static int deny(const char *why)
+          {
+          	if (!BB_ENFORCING) return 0;
+          	if (BB_ALLOW_IN_RECOVERY && in_recovery_mode()) return 0;
+          #if BB_VERBOSE
+          	pr_info("baseband_guard: deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
+          #endif
+          	return -EPERM;
+          }
+          
+          /* 仅在“受保护分区”或“你后续想扩的整盘”上拦破坏性 ioctl；默认这里只对受保护分区生效 */
           static bool is_destructive_ioctl(unsigned int cmd)
           {
           	switch (cmd) {
           	case BLKDISCARD:
           	case BLKSECDISCARD:
           	case BLKZEROOUT:
-          #ifdef BLKDISCARDZEROES
-          	case BLKDISCARDZEROES:
-          #endif
           #ifdef BLKPG
           	case BLKPG:
           #endif
           #ifdef BLKTRIM
           	case BLKTRIM:
           #endif
-          #ifdef BLKRESETZONE
-          	case BLKRESETZONE:
-          #endif
-          #ifdef BLKOPENZONE
-          	case BLKOPENZONE:
-          #endif
-          #ifdef BLKCLOSEZONE
-          	case BLKCLOSEZONE:
-          #endif
-          #ifdef BLKRMZGROUP
-          	case BLKRMZGROUP:
+          #ifdef BLKRRPART
+          	case BLKRRPART:
           #endif
           #ifdef BLKSETRO
           	case BLKSETRO:
           #endif
-          #ifdef BLKROSET
-          	case BLKROSET:
-          #endif
           #ifdef BLKSETBADSECTORS
           	case BLKSETBADSECTORS:
           #endif
-          	case BLKRRPART:
           		return true;
           	default:
           		return false;
           	}
           }
           
+          /* === LSM hooks === */
+          
+          static int bb_file_open(struct file *file)
+          {
+          	struct inode *inode;
+          
+          	if (!file) return 0;
+          	inode = file_inode(file);
+          
+          	/* 只关心“以写方式”打开的块设备 */
+          	if (!S_ISBLK(inode->i_mode) || !is_write_open(file))
+          		return 0;
+          
+          	/* 第一次触发时构建缓存（解析固定少量名字），无计时、无目录遍历 */
+          	if (!READ_ONCE(bbg_cache_built))
+          		build_cache_once();
+          
+          	/* 命中则拒绝 */
+          	if (cache_has(inode->i_rdev))
+          		return deny("open protected partition writable");
+          
+          	return 0;
+          }
+          
           static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
           {
           	struct inode *inode;
-          	struct block_device *bdev;
           
-          	if (!file)
-          		return 0;
-          
+          	if (!file) return 0;
           	inode = file_inode(file);
           	if (!S_ISBLK(inode->i_mode))
           		return 0;
           
-          	bdev = I_BDEV(inode);
-          
-          	/* Only restrict ioctls on protected partitions or physical whole disks */
-          	if (bbg_is_protected_dev(inode->i_rdev)
-          #if BB_BLOCK_WHOLEDISK
-          	    || is_wholedisk(bdev)
-          #endif
-          	   ) {
-          		if (is_destructive_ioctl(cmd))
-          			return deny("destructive ioctl on protected device");
-          	}
+          	/* 仅在受保护分区上拦破坏性 ioctl（整盘默认不拦，避免影响系统） */
+          	if (cache_has(inode->i_rdev) && is_destructive_ioctl(cmd))
+          		return deny("destructive ioctl on protected partition");
           
           	return 0;
           }
@@ -679,23 +555,11 @@ jobs:
           #endif
           };
           
-          /* ===== Init ===== */
-          
           static int __init bb_init(void)
           {
           	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
-          
-          	/* 延迟扫描 /dev/block/by-name（避免 early 阶段尚未就绪） */
-          	INIT_DELAYED_WORK(&bbg_scan_work, bbg_scan_worker);
-          	schedule_delayed_work(&bbg_scan_work, msecs_to_jiffies(BBG_SCAN_DELAY_MS));
-          
           #if BB_VERBOSE
-          	pr_info("baseband_guard: initialized (always ENFORCING), "
-          		"allow_in_recovery=%d, block_wholedisk=%d, delayed_scan=%ums\n",
-          		(int)BB_ALLOW_IN_RECOVERY, (int)BB_BLOCK_WHOLEDISK,
-          		(unsigned)BBG_SCAN_DELAY_MS);
-          	pr_info("baseband_guard: scan retry policy: %ums x %d (failure-only)\n",
-          		(unsigned)BBG_SCAN_RETRY_MS, (int)BBG_SCAN_MAX_RETRY);
+          	pr_info("baseband_guard: initialized (ENFORCING), on-demand cache build\n");
           #endif
           	return 0;
           }
@@ -705,10 +569,9 @@ jobs:
           	.init = bb_init,
           };
           
-          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (dev_t-based, delayed scan, no genhd deps, no runtime knobs)");
+          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (on-demand lookup_bdev cache; no timers/dir walks)");
           MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
-
 
           EOF
 
