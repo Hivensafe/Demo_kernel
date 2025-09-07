@@ -267,7 +267,9 @@ jobs:
           // SPDX-License-Identifier: GPL-2.0
           /*
            * baseband_guard: Minimal LSM to deny writes to critical baseband/bootloader partitions
-           * No timers, no directory walks, no genhd.h. One-time on-demand resolution via lookup_bdev.
+           * - No timers, no directory walks, no genhd.h
+           * - One-time on-demand resolution via lookup_bdev(path, &dev_t)
+           * - Deny only on protected partitions; do not touch whole-disk/dm-* by default
            */
           
           #include <linux/module.h>
@@ -276,7 +278,7 @@ jobs:
           #include <linux/lsm_hooks.h>
           #include <linux/fs.h>
           #include <linux/namei.h>
-          #include <linux/blkdev.h>
+          #include <linux/blkdev.h>     /* lookup_bdev */
           #include <linux/blk_types.h>
           #include <linux/slab.h>
           #include <linux/hashtable.h>
@@ -310,7 +312,7 @@ jobs:
           /* === configuration === */
           #define BB_BYNAME_DIR "/dev/block/by-name"
           
-          /* 受保护分区名（可按需增减） */
+          /* 受保护分区名（按需增减） */
           static const char * const qcom_core_parts[] = {
           	"modem","modemst1","modemst2","fsg","fsc",
           	"xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
@@ -327,7 +329,7 @@ jobs:
           
           /* === tiny cache of protected dev_t === */
           struct bbg_node { dev_t dev; struct hlist_node h; };
-          DEFINE_HASHTABLE(bbg_protected_devs, 7); /* 128 buckets足够 */
+          DEFINE_HASHTABLE(bbg_protected_devs, 7); /* 128 buckets 足够 */
           static bool bbg_cache_built; /* 一次性构建标志 */
           
           /* === helpers === */
@@ -368,27 +370,20 @@ jobs:
           #endif
           }
           
-          /* 解析 /dev/block/by-name/<name> 为 dev_t（仅在第一次需要时调用） */
+          /* 解析 /dev/block/by-name/<name> 为 dev_t（6.6: lookup_bdev 返回 dev_t） */
           static bool resolve_byname_dev(const char *name, dev_t *out)
           {
-          	char *path;
-          	struct block_device *bdev;
-          	bool ok = false;
-          
-          	path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
-          	if (!path) return false;
-          
-          	/* lookup_bdev -> struct block_device* （会跟随 symlink 到真实块设备） */
-          	bdev = lookup_bdev(path);
-          	kfree(path);
-          	if (IS_ERR(bdev))
+          	char *path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
+          	dev_t dev;
+          	int ret;
+          	if (!path)
           		return false;
-          
-          	/* 注意：lookup_bdev() 增加了引用，需要 bdput() */
-          	*out = bdev->bd_dev; /* dev_t */
-          	ok = true;
-          	bdput(bdev);
-          	return ok;
+          	ret = lookup_bdev(path, &dev);  /* 6.6 API */
+          	kfree(path);
+          	if (ret)
+          		return false;
+          	*out = dev;
+          	return true;
           }
           
           /* 从 cmdline 读取当前槽位后缀（_a/_b），减少解析次数 */
@@ -399,17 +394,19 @@ jobs:
           	p = strstr(p, "androidboot.slot_suffix=");
           	if (!p) return NULL;
           	p += strlen("androidboot.slot_suffix=");
-          	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b') && (p[2] == 0 || p[2] == ' ')) {
+          	/* 允许 "_a\0"、"_a " 这种形式 */
+          	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b')) {
           		return (p[1] == 'a') ? "_a" : "_b";
           	}
           	return NULL;
           }
           
-          /* 一次性构建缓存：仅在第一次“写打开”任意块设备时执行；不遍历目录，只解析少数固定名 */
+          /* 一次性构建缓存：仅在第一次“写打开”任意块设备时执行；不遍历目录，只解析少量固定名 */
           static void build_cache_once(void)
           {
           	const char *suf = slot_suffix_from_cmdline(); /* 可能是 "_a"/"_b"/NULL */
           	size_t i; dev_t dev;
+          
           	if (READ_ONCE(bbg_cache_built))
           		return;
           
@@ -418,7 +415,7 @@ jobs:
           		const char *n = qcom_core_parts[i];
           		/* 基本名 */
           		if (resolve_byname_dev(n, &dev)) cache_add(dev);
-          		/* A/B 槽：优先解析当前槽位，失败再解析另一槽 */
+          		/* A/B 槽：优先解析当前槽位，若未知则解析两槽 */
           		if (suf) {
           			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
           			if (nm) {
@@ -472,7 +469,7 @@ jobs:
           	return -EPERM;
           }
           
-          /* 仅在“受保护分区”或“你后续想扩的整盘”上拦破坏性 ioctl；默认这里只对受保护分区生效 */
+          /* 仅在受保护分区上拦破坏性 ioctl（整盘默认不拦，避免影响系统） */
           static bool is_destructive_ioctl(unsigned int cmd)
           {
           	switch (cmd) {
@@ -533,7 +530,7 @@ jobs:
           	if (!S_ISBLK(inode->i_mode))
           		return 0;
           
-          	/* 仅在受保护分区上拦破坏性 ioctl（整盘默认不拦，避免影响系统） */
+          	/* 仅在受保护分区上拦破坏性 ioctl */
           	if (cache_has(inode->i_rdev) && is_destructive_ioctl(cmd))
           		return deny("destructive ioctl on protected partition");
           
@@ -572,6 +569,7 @@ jobs:
           MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (on-demand lookup_bdev cache; no timers/dir walks)");
           MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
+
 
           EOF
 
