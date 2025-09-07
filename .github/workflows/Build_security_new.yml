@@ -267,16 +267,15 @@ jobs:
           // SPDX-License-Identifier: GPL-2.0
           /*
            * baseband_guard: LSM to protect critical baseband/bootloader partitions
-           * Target: Android common kernel 6.6 (and similar vendor trees)
+           * Strategy (no genhd.h dependencies):
+           *   - At init, walk a fixed allowlist of partition names (and _a/_b variants),
+           *     resolve /dev/block/by-name/<part> symlinks to real block devices,
+           *     record their dev_t (major:minor) into a kernel hashtable.
+           *   - On file_open, if a block device is opened writable and its i_rdev is in
+           *     the protected set => deny with -EPERM.
+           *   - Optionally block whole-disk nodes (sda/sdX, mmcblk*, nvme*, dm-*).
            *
-           * Runtime is always ENFORCING. No sysfs/module parameters are created.
-           *
-           * Strategy:
-           *   - Prefer robust match using block partition meta (GPT PARTNAME) when available.
-           *   - Fallback to path-based /by-name/ match if genhd headers are hidden/absent.
-           *   - Optionally block writable open on whole-disk nodes.
-           *   - Block destructive block IOCTLs.
-           *   - Optionally allow writes in recovery based on cmdline (compile-time).
+           * Runtime is always ENFORCING. No /sys/module parameters are created.
            */
           
           #include <linux/module.h>
@@ -284,85 +283,78 @@ jobs:
           #include <linux/security.h>
           #include <linux/lsm_hooks.h>
           #include <linux/fs.h>
-          #include <linux/fcntl.h>     /* O_ACCMODE, O_RDONLY */
+          #include <linux/namei.h>
+          #include <linux/path.h>
+          #include <linux/dcache.h>
           #include <linux/blkdev.h>
           #include <linux/blk_types.h>
           #include <linux/cred.h>
+          #include <linux/limits.h>
           #include <linux/string.h>
           #include <linux/printk.h>
           #include <linux/errno.h>
           #include <linux/version.h>
+          #include <linux/slab.h>
+          #include <linux/hashtable.h>
+          #include <linux/uaccess.h>
           
-          /* Some vendor trees hide genhd headers; detect and adapt. */
-          #if defined(__has_include)
-          # if __has_include(<linux/genhd.h>)
-          #  include <linux/genhd.h>
-          #  define BB_HAVE_GENHD 1
-          # elif __has_include(<block/genhd.h>)
-          #  include <block/genhd.h>
-          #  define BB_HAVE_GENHD 1
-          # else
-          #  define BB_HAVE_GENHD 0
-          # endif
-          #else
-          # define BB_HAVE_GENHD 0
-          #endif
-          
-          /* If genhd headers are absent but disk_name() still exists inline elsewhere,
-           * you could forward-declare it; however on many trees that causes undefined.
-           * We therefore avoid disk_name() unless BB_HAVE_GENHD==1.
-           */
-          
-          /* In your tree it's declared as char*, not const */
           extern char *saved_command_line; /* from init/main.c */
           
-          /* -------- Compile-time policy (no runtime knobs) -------- */
+          /* ===== Compile-time policy (no runtime knobs) ===== */
           #define BB_ENFORCING                 1
+          
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY
           #define BB_ALLOW_IN_RECOVERY         1
           #else
           #define BB_ALLOW_IN_RECOVERY         0
           #endif
+          
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG
           #define BB_PROTECT_BOOTIMG           1
           #else
           #define BB_PROTECT_BOOTIMG           0
           #endif
+          
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK
           #define BB_BLOCK_WHOLEDISK           1
           #else
           #define BB_BLOCK_WHOLEDISK           0
           #endif
+          
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE
           #define BB_VERBOSE                   1
           #else
           #define BB_VERBOSE                   0
           #endif
           
-          /* -------- Protected partition name lists (without _a/_b) -------- */
+          /* ===== Constants ===== */
+          #define BB_BYNAME_DIR   "/dev/block/by-name"
+          
+          /* Common Qualcomm/Android sensitive partitions */
           static const char * const qcom_core_parts[] = {
           	/* baseband + calibration */
-          	"modem", "modemst1", "modemst2", "fsg", "fsc", "bluetooth",
-          	"dsp", "cdsp", "qweslicstore", "qweslicstorebak",
+          	"modem","modemst1","modemst2","fsg","fsc","bluetooth",
+          	"dsp","cdsp","qweslicstore","qweslicstorebak",
           	/* boot chain / firmware */
-          	"xbl", "xbl_config", "abl", "tz", "hyp", "cmnlib", "cmnlib64",
-          	"keymaster", "devcfg", "uefisecapp", "qupfw", "featenabler",
-          	"vbmeta", "vbmeta_system", "vbmeta_vendor", "vbmeta_system_ext",
+          	"xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
+          	"keymaster","devcfg","uefisecapp","qupfw","featenabler",
+          	"vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_system_ext",
           	/* misc binding */
-          	"keystore", "rpm", "rpmfw", "uefi", "spunvm", "apdp", "msadp",
+          	"keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp","ocdt",
           };
           
           static const char * const bootimg_parts[] = {
-          	"boot", "dtbo", "vendor_boot", "init_boot", "recovery"
+          	"boot","dtbo","vendor_boot","init_boot","recovery"
           };
           
-          /* whole-disk nodes by disk_name prefix (gendisk->disk_name) */
-          static const char * const wholedisk_prefixes[] = {
-          	"sda", "sdb", "mmcblk", "nvme", "dm-"
-          };
+          /* Whole-disk name prefixes (gendisk->disk_name); avoid enumerating sd a/b... */
+          static const char * const wholedisk_prefixes[] = { "sd", "mmcblk", "nvme", "dm-" };
           
-          /* -------- Helpers -------- */
+          /* ===== Protected device set: hash of dev_t ===== */
+          struct bbg_node { dev_t dev; struct hlist_node h; };
+          DEFINE_HASHTABLE(bbg_protected_devs, 8); /* 256 buckets */
           
+          /* ===== Helpers ===== */
           static bool in_recovery_mode(void)
           {
           #if BB_ALLOW_IN_RECOVERY
@@ -370,7 +362,7 @@ jobs:
           		return false;
           	if (strstr(saved_command_line, "androidboot.mode=recovery"))
           		return true;
-          	/* Some recovery boots set keywords with skip_initramfs and "recovery" */
+          	/* Some vendor trees mark recovery differently */
           	if (strstr(saved_command_line, "skip_initramfs=1") &&
           	    strstr(saved_command_line, "recovery"))
           		return true;
@@ -380,11 +372,9 @@ jobs:
           
           static bool is_write_open(const struct file *file)
           {
-          	if (!file)
-          		return false;
-          	if (file->f_mode & FMODE_WRITE)
-          		return true;
-          	/* Extra guard in case some trees rely on f_flags */
+          	if (!file) return false;
+          	if (file->f_mode & FMODE_WRITE) return true;
+          	/* Fallback: check userspace flags too */
           	return ((file->f_flags & O_ACCMODE) != O_RDONLY);
           }
           
@@ -395,116 +385,55 @@ jobs:
           
           	if (!bdev || !bdev->bd_disk)
           		return false;
-          
           	dn = bdev->bd_disk->disk_name;
           	if (!dn)
           		return false;
           
-          	for (i = 0; i < ARRAY_SIZE(wholedisk_prefixes); i++)
-          		if (!strncmp(dn, wholedisk_prefixes[i],
-          			     strlen(wholedisk_prefixes[i])))
+          	for (i = 0; i < ARRAY_SIZE(wholedisk_prefixes); i++) {
+          		size_t p = strlen(wholedisk_prefixes[i]);
+          		/* exact "dm-<num>" style, or prefix "sd","mmcblk","nvme" */
+          		if (!strncmp(dn, wholedisk_prefixes[i], p))
           			return true;
+          	}
           	return false;
           }
           
-          static void trim_ab_suffix(char *s)
+          static void bbg_protect_dev(dev_t dev)
           {
-          	size_t len;
+          	struct bbg_node *n;
           
-          	if (!s)
+          	/* Skip zero dev_t just in case */
+          	if (!dev)
           		return;
-          	len = strnlen(s, 63);
-          	if (len > 2 && s[len - 2] == '_' &&
-          	    (s[len - 1] == 'a' || s[len - 1] == 'b')) {
-          		s[len - 2] = '\0';
-          	}
-          }
           
-          /* ---- Protected target detection (two implementations) ---- */
-          
-          /* A) Robust: use partition meta info (requires genhd headers) */
-          #if BB_HAVE_GENHD
-          static bool is_protected_bdev_meta(struct block_device *bdev)
-          {
-          	const struct hd_struct *part;
-          	char name[64];
-          	size_t i;
-          
-          	if (!bdev)
-          		return false;
-          
-          	part = bdev->bd_part;              /* NULL => whole disk; non-NULL => a partition */
-          	if (!part || !part->info)
-          		return false;               /* whole disk or no info => not matched here */
-          
-          	if (!part->info->volname[0])
-          		return false;               /* no PARTNAME */
-          
-          	strscpy(name, part->info->volname, sizeof(name));
-          	trim_ab_suffix(name);
-          
-          	/* radio/firmware */
-          	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
-          		if (!strcmp(name, qcom_core_parts[i]))
-          			return true;
-          
-          #if BB_PROTECT_BOOTIMG
-          	for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++)
-          		if (!strcmp(name, bootimg_parts[i]))
-          			return true;
-          #endif
-          	return false;
-          }
-          #endif /* BB_HAVE_GENHD */
-          
-          /* B) Fallback: path-based /by-name/ match (works even if file_open receives final path).
-           * Note: d_path() returns the resolved target. To still support by-name opens,
-           * we accept both: paths containing "/by-name/<label>" (when not fully resolved yet),
-           * and final basenames that equal the label (some vendor uevents may expose that).
-           */
-          static bool is_protected_by_path(const char *path)
-          {
-          	const char *base;
-          	char name[64];
-          	size_t len, i;
-          
-          	if (!path)
-          		return false;
-          
-          	/* Quick reject */
-          	if (!strstr(path, "/by-name/")) {
-          		/* Some rare setups keep label as base name; handle that too. */
-          		base = strrchr(path, '/');
-          		base = base ? base + 1 : path;
-          		len = strnlen(base, sizeof(name) - 1);
-          		memcpy(name, base, len);
-          		name[len] = '\0';
-          		goto compare_lists;
+          	/* avoid duplicates (cheap check) */
+          	{
+          		struct bbg_node *cur;
+          		hash_for_each_possible(bbg_protected_devs, cur, h, (u64)dev) {
+          			if (cur->dev == dev)
+          				return;
+          		}
           	}
           
-          	/* Extract the by-name label */
-          	base = strrchr(path, '/');
-          	base = base ? base + 1 : path;
-          	len = strnlen(base, sizeof(name) - 1);
-          	memcpy(name, base, len);
-          	name[len] = '\0';
+          	n = kmalloc(sizeof(*n), GFP_KERNEL);
+          	if (!n)
+          		return;
+          	n->dev = dev;
+          	hash_add(bbg_protected_devs, &n->h, (u64)dev);
           
-          compare_lists:
-          	trim_ab_suffix(name);
-          
-          	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
-          		if (!strcmp(name, qcom_core_parts[i]))
-          			return true;
-          
-          #if BB_PROTECT_BOOTIMG
-          	for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++)
-          		if (!strcmp(name, bootimg_parts[i]))
-          			return true;
+          #if BB_VERBOSE
+          	pr_info("baseband_guard: protect dev %u:%u\n", MAJOR(dev), MINOR(dev));
           #endif
-          	return false;
           }
           
-          /* -------- LSM internals -------- */
+          static bool bbg_is_protected_dev(dev_t dev)
+          {
+          	struct bbg_node *cur;
+          	hash_for_each_possible(bbg_protected_devs, cur, h, (u64)dev) {
+          		if (cur->dev == dev) return true;
+          	}
+          	return false;
+          }
           
           static int deny(const char *why)
           {
@@ -519,10 +448,70 @@ jobs:
           	return -EPERM;
           }
           
+          /* ===== by-name scanning without genhd: resolve symlinks and collect dev_t ===== */
+          
+          static int bbg_try_add_one(const char *name)
+          {
+          	char path[PATH_MAX];
+          	struct path p;
+          	struct inode *inode;
+          	int ret;
+          
+          	/* Build /dev/block/by-name/<name> */
+          	if (snprintf(path, sizeof(path), "%s/%s", BB_BYNAME_DIR, name) >= sizeof(path))
+          		return -ENAMETOOLONG;
+          
+          	ret = kern_path(path, LOOKUP_FOLLOW, &p);
+          	if (ret)
+          		return ret;
+          
+          	inode = d_backing_inode(p.dentry);
+          	if (inode && S_ISBLK(inode->i_mode)) {
+          		bbg_protect_dev(inode->i_rdev);
+          	}
+          	path_put(&p);
+          	return 0;
+          }
+          
+          static void bbg_scan_byname_fixedlist(void)
+          {
+          	size_t i;
+          
+          	/* Core partitions */
+          	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++) {
+          		const char *n = qcom_core_parts[i];
+          		/* base name */
+          		bbg_try_add_one(n);
+          		/* A/B slots */
+          		{
+          			char buf[64];
+          			if (snprintf(buf, sizeof(buf), "%s_a", n) < sizeof(buf))
+          				bbg_try_add_one(buf);
+          			if (snprintf(buf, sizeof(buf), "%s_b", n) < sizeof(buf))
+          				bbg_try_add_one(buf);
+          		}
+          	}
+          
+          #if BB_PROTECT_BOOTIMG
+          	for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++) {
+          		const char *n = bootimg_parts[i];
+          		bbg_try_add_one(n);
+          		{
+          			char buf[64];
+          			if (snprintf(buf, sizeof(buf), "%s_a", n) < sizeof(buf))
+          				bbg_try_add_one(buf);
+          			if (snprintf(buf, sizeof(buf), "%s_b", n) < sizeof(buf))
+          				bbg_try_add_one(buf);
+          		}
+          	}
+          #endif
+          }
+          
+          /* ===== LSM hooks ===== */
+          
           static int bb_file_open(struct file *file)
           {
           	struct inode *inode;
-          	struct block_device *bdev;
           
           	if (!file)
           		return 0;
@@ -533,37 +522,30 @@ jobs:
           	if (!S_ISBLK(inode->i_mode) || !is_write_open(file))
           		return 0;
           
-          	bdev = I_BDEV(inode);
-          
           #if BB_BLOCK_WHOLEDISK
-          	/* deny writes on raw whole-disk nodes to prevent bypass */
-          	if (is_wholedisk(bdev))
+          	/* Block raw whole-disk nodes */
+          	if (is_wholedisk(I_BDEV(inode)))
           		return deny("open wholedisk writable");
           #endif
           
-          	/* ---- Match protected partitions ---- */
-          #if BB_HAVE_GENHD
-          	if (is_protected_bdev_meta(bdev))
+          	/* Deny protected partitions by dev_t set */
+          	if (bbg_is_protected_dev(inode->i_rdev))
           		return deny("open protected partition writable");
-          #else
-          	/* Fallback: attempt to use the visible path (works for /by-name/ opens) */
+          
+          #if BB_VERBOSE
+          	/* Debug breadcrumb (can be removed later) */
           	{
-          		char *tmp = (char *)__get_free_page(GFP_KERNEL);
-          		if (tmp) {
-          			char *p = d_path(&file->f_path, tmp, PAGE_SIZE);
-          			if (!IS_ERR(p) && is_protected_by_path(p)) {
-          				free_page((unsigned long)tmp);
-          				return deny("open protected (by-name) partition writable");
-          			}
-          			free_page((unsigned long)tmp);
-          		}
+          		const char *dn = (I_BDEV(inode) && I_BDEV(inode)->bd_disk) ?
+          		                 I_BDEV(inode)->bd_disk->disk_name : "?";
+          		pr_info("baseband_guard: pass blk open fmode=%x flags=%x disk=%s dev=%u:%u\n",
+          			file->f_mode, file->f_flags, dn,
+          			MAJOR(inode->i_rdev), MINOR(inode->i_rdev));
           	}
           #endif
-          
           	return 0;
           }
           
-          /* Block destructive ioctls even if someone opened read-only but issues ioctl */
+          /* Destructive ioctls guard */
           static bool is_destructive_ioctl(unsigned int cmd)
           {
           	switch (cmd) {
@@ -621,7 +603,6 @@ jobs:
           }
           #endif
           
-          /* Avoid __lsm_ro_after_init for portability across vendor trees */
           static struct security_hook_list bb_hooks[] = {
           	LSM_HOOK_INIT(file_open, bb_file_open),
           	LSM_HOOK_INIT(file_ioctl, bb_file_ioctl),
@@ -630,12 +611,19 @@ jobs:
           #endif
           };
           
+          /* ===== Init ===== */
+          
           static int __init bb_init(void)
           {
           	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
+          
+          	/* Build the protected dev_t set once at boot */
+          	bbg_scan_byname_fixedlist();
+          
           #if BB_VERBOSE
-          	pr_info("baseband_guard: initialized (ENFORCING), allow_in_recovery=%d, block_wholedisk=%d, genhd=%d\n",
-          		(int)BB_ALLOW_IN_RECOVERY, (int)BB_BLOCK_WHOLEDISK, (int)BB_HAVE_GENHD);
+          	pr_info("baseband_guard: initialized (always ENFORCING), "
+          		"allow_in_recovery=%d, block_wholedisk=%d\n",
+          		(int)BB_ALLOW_IN_RECOVERY, (int)BB_BLOCK_WHOLEDISK);
           #endif
           	return 0;
           }
@@ -645,9 +633,10 @@ jobs:
           	.init = bb_init,
           };
           
-          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (no runtime knobs)");
-          MODULE_AUTHOR("秋刀鱼 + ChatGPT");
+          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (dev_t-based, no genhd deps, no runtime knobs)");
+          MODULE_AUTHOR("秋刀鱼");
           MODULE_LICENSE("GPL v2");
+          
 
 
           EOF
