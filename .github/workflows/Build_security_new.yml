@@ -546,7 +546,7 @@ jobs:
           	if (is_protected_bdev_meta(bdev))
           		return deny("open protected partition writable");
           #else
-          	/* Fallback: attempt to use the visible path (works for /by-name/* opens) */
+          	/* Fallback: attempt to use the visible path (works for /by-name/ opens) */
           	{
           		char *tmp = (char *)__get_free_page(GFP_KERNEL);
           		if (tmp) {
