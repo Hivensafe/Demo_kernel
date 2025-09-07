@@ -449,29 +449,35 @@ jobs:
           }
           
           /* ===== by-name scanning without genhd: resolve symlinks and collect dev_t ===== */
-          
           static int bbg_try_add_one(const char *name)
           {
-          	char path[PATH_MAX];
-          	struct path p;
-          	struct inode *inode;
-          	int ret;
+              char *path;
+              struct path p;
+              struct inode *inode;
+              int ret;
           
-          	/* Build /dev/block/by-name/<name> */
-          	if (snprintf(path, sizeof(path), "%s/%s", BB_BYNAME_DIR, name) >= sizeof(path))
-          		return -ENAMETOOLONG;
+              /* 动态拼接路径，避免在栈上放 PATH_MAX */
+              path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
+              if (!path)
+                  return -ENOMEM;
           
-          	ret = kern_path(path, LOOKUP_FOLLOW, &p);
-          	if (ret)
-          		return ret;
+              ret = kern_path(path, LOOKUP_FOLLOW, &p);
+              kfree(path);
+              if (ret)
+                  return ret;
           
-          	inode = d_backing_inode(p.dentry);
-          	if (inode && S_ISBLK(inode->i_mode)) {
-          		bbg_protect_dev(inode->i_rdev);
-          	}
-          	path_put(&p);
-          	return 0;
+              inode = d_backing_inode(p.dentry);
+              if (inode && S_ISBLK(inode->i_mode)) {
+                  bbg_protect_dev(inode->i_rdev);
+          #if BB_VERBOSE
+                  pr_info("baseband_guard: protect dev %u:%u for %s\n",
+                          MAJOR(inode->i_rdev), MINOR(inode->i_rdev), name);
+          #endif
+              }
+              path_put(&p);
+              return 0;
           }
+
           
           static void bbg_scan_byname_fixedlist(void)
           {
