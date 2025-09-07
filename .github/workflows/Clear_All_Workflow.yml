@@ -9,6 +9,7 @@ on:
         required: true
         default: 'Build_serialID_check'
         options:
+          - Build_security_new
           - Build_security_check
           - Encrypt_script
           - Build_serialID_check
