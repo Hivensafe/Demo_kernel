@@ -273,7 +273,7 @@ jobs:
            *     record their dev_t (major:minor) into a kernel hashtable.
            *   - On file_open, if a block device is opened writable and its i_rdev is in
            *     the protected set => deny with -EPERM.
-           *   - Optionally block whole-disk nodes (sda/sdX, mmcblk*, nvme*, dm-*).
+           *   - Optionally block whole-disk nodes (physical only: sd*, mmcblk*, nvme*).
            *
            * Runtime is always ENFORCING. No /sys/module parameters are created.
            */
@@ -340,15 +340,15 @@ jobs:
           	"keymaster","devcfg","uefisecapp","qupfw","featenabler",
           	"vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_system_ext",
           	/* misc binding */
-          	"keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp","ocdt",
+          	"keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp","ocdt"
           };
           
           static const char * const bootimg_parts[] = {
           	"boot","dtbo","vendor_boot","init_boot","recovery"
           };
           
-          /* Whole-disk name prefixes (gendisk->disk_name); avoid enumerating sd a/b... */
-          static const char * const wholedisk_prefixes[] = { "sd", "mmcblk", "nvme", "dm-" };
+          /* Whole-disk name prefixes (PHYSICAL ONLY; do NOT include "dm-") */
+          static const char * const wholedisk_prefixes[] = { "sd", "mmcblk", "nvme" };
           
           /* ===== Protected device set: hash of dev_t ===== */
           struct bbg_node { dev_t dev; struct hlist_node h; };
@@ -391,7 +391,7 @@ jobs:
           
           	for (i = 0; i < ARRAY_SIZE(wholedisk_prefixes); i++) {
           		size_t p = strlen(wholedisk_prefixes[i]);
-          		/* exact "dm-<num>" style, or prefix "sd","mmcblk","nvme" */
+          		/* prefix match: "sd", "mmcblk", "nvme" */
           		if (!strncmp(dn, wholedisk_prefixes[i], p))
           			return true;
           	}
@@ -449,35 +449,35 @@ jobs:
           }
           
           /* ===== by-name scanning without genhd: resolve symlinks and collect dev_t ===== */
+          
           static int bbg_try_add_one(const char *name)
           {
-              char *path;
-              struct path p;
-              struct inode *inode;
-              int ret;
+          	char *path;
+          	struct path p;
+          	struct inode *inode;
+          	int ret;
           
-              /* 动态拼接路径，避免在栈上放 PATH_MAX */
-              path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
-              if (!path)
-                  return -ENOMEM;
+          	/* Build /dev/block/by-name/<name> on heap to avoid large stack frame */
+          	path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
+          	if (!path)
+          		return -ENOMEM;
           
-              ret = kern_path(path, LOOKUP_FOLLOW, &p);
-              kfree(path);
-              if (ret)
-                  return ret;
+          	ret = kern_path(path, LOOKUP_FOLLOW, &p);
+          	kfree(path);
+          	if (ret)
+          		return ret;
           
-              inode = d_backing_inode(p.dentry);
-              if (inode && S_ISBLK(inode->i_mode)) {
-                  bbg_protect_dev(inode->i_rdev);
+          	inode = d_backing_inode(p.dentry);
+          	if (inode && S_ISBLK(inode->i_mode)) {
+          		bbg_protect_dev(inode->i_rdev);
           #if BB_VERBOSE
-                  pr_info("baseband_guard: protect dev %u:%u for %s\n",
-                          MAJOR(inode->i_rdev), MINOR(inode->i_rdev), name);
+          		pr_info("baseband_guard: protect dev %u:%u for %s\n",
+          			MAJOR(inode->i_rdev), MINOR(inode->i_rdev), name);
           #endif
-              }
-              path_put(&p);
-              return 0;
+          	}
+          	path_put(&p);
+          	return 0;
           }
-
           
           static void bbg_scan_byname_fixedlist(void)
           {
@@ -518,6 +518,7 @@ jobs:
           static int bb_file_open(struct file *file)
           {
           	struct inode *inode;
+          	struct block_device *bdev;
           
           	if (!file)
           		return 0;
@@ -528,9 +529,11 @@ jobs:
           	if (!S_ISBLK(inode->i_mode) || !is_write_open(file))
           		return 0;
           
+          	bdev = I_BDEV(inode);
+          
           #if BB_BLOCK_WHOLEDISK
-          	/* Block raw whole-disk nodes */
-          	if (is_wholedisk(I_BDEV(inode)))
+          	/* Block raw whole-disk nodes (physical only) */
+          	if (is_wholedisk(bdev))
           		return deny("open wholedisk writable");
           #endif
           
@@ -541,8 +544,7 @@ jobs:
           #if BB_VERBOSE
           	/* Debug breadcrumb (can be removed later) */
           	{
-          		const char *dn = (I_BDEV(inode) && I_BDEV(inode)->bd_disk) ?
-          		                 I_BDEV(inode)->bd_disk->disk_name : "?";
+          		const char *dn = (bdev && bdev->bd_disk) ? bdev->bd_disk->disk_name : "?";
           		pr_info("baseband_guard: pass blk open fmode=%x flags=%x disk=%s dev=%u:%u\n",
           			file->f_mode, file->f_flags, dn,
           			MAJOR(inode->i_rdev), MINOR(inode->i_rdev));
@@ -551,7 +553,7 @@ jobs:
           	return 0;
           }
           
-          /* Destructive ioctls guard */
+          /* Limit destructive ioctls only on protected partitions or physical whole disks */
           static bool is_destructive_ioctl(unsigned int cmd)
           {
           	switch (cmd) {
@@ -597,8 +599,28 @@ jobs:
           
           static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
           {
-          	if (is_destructive_ioctl(cmd))
-          		return deny("destructive ioctl");
+          	struct inode *inode;
+          	struct block_device *bdev;
+          
+          	if (!file)
+          		return 0;
+          
+          	inode = file_inode(file);
+          	if (!S_ISBLK(inode->i_mode))
+          		return 0;
+          
+          	bdev = I_BDEV(inode);
+          
+          	/* Only restrict ioctls on protected partitions or physical whole disks */
+          	if (bbg_is_protected_dev(inode->i_rdev)
+          #if BB_BLOCK_WHOLEDISK
+          	    || is_wholedisk(bdev)
+          #endif
+          	   ) {
+          		if (is_destructive_ioctl(cmd))
+          			return deny("destructive ioctl on protected device");
+          	}
+          
           	return 0;
           }
           
@@ -640,10 +662,8 @@ jobs:
           };
           
           MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (dev_t-based, no genhd deps, no runtime knobs)");
-          MODULE_AUTHOR("秋刀鱼");
+          MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
-          
-
 
           EOF
 
