@@ -267,12 +267,12 @@ jobs:
           // SPDX-License-Identifier: GPL-2.0
           /*
            * baseband_guard: LSM to protect critical baseband/bootloader partitions
-           * Target: Android common kernel 6.6 (sm8750 and similar)
+           * Target: Android common kernel 6.6 (and similar vendor trees)
            *
            * Runtime is always ENFORCING. No sysfs/module parameters are created.
            * Strategy:
-           *   - Block writable open on protected partitions by matching GPT PARTNAME
-           *     from bdev->bd_part->info->volname (more robust than /by-name paths).
+           *   - Block writable open on protected partitions by matching device name
+           *     obtained via disk_name(gendisk, partno, buf). This aligns with by-name.
            *   - Optionally block writable open on whole-disk nodes.
            *   - Block destructive block IOCTLs.
            *   - Optionally allow writes in recovery based on cmdline (compile-time).
@@ -284,19 +284,17 @@ jobs:
           #include <linux/lsm_hooks.h>
           #include <linux/fs.h>
           #include <linux/fcntl.h>     /* O_ACCMODE, O_RDONLY */
-          #include <linux/namei.h>
-          #include <linux/dcache.h>
           #include <linux/blkdev.h>
           #include <linux/blk_types.h>
           #include <linux/cred.h>
-          #include <linux/limits.h>
           #include <linux/string.h>
           #include <linux/printk.h>
           #include <linux/errno.h>
           #include <linux/version.h>
-          #ifdef CONFIG_BLK_DEV_INITRD
-          #include <linux/blkpg.h>     /* BLKPG on some configs */
-          #endif
+          
+          /* Some vendor trees don't expose genhd.h; declare disk_name() ourselves. */
+          struct gendisk;
+          extern void disk_name(struct gendisk *gd, int partno, char *buf);
           
           /* In your tree it's declared as char*, not const */
           extern char *saved_command_line; /* from init/main.c */
@@ -405,33 +403,35 @@ jobs:
           	}
           }
           
-          /* Read GPT PARTNAME from bd_part->info->volname and match our lists */
+          /* Read device/partition name via disk_name() and match our lists.
+           * disk_name() returns names aligned with /dev/block/by-name targets on Android.
+           */
           static bool is_protected_bdev(struct block_device *bdev)
           {
-              char name[64];
-              size_t i;
+          	char name[64];
+          	size_t i;
           
-              if (!bdev || !bdev->bd_disk)
-                  return false;
+          	if (!bdev || !bdev->bd_disk)
+          		return false;
           
-              /* disk_name 会返回分区名，如 "sda", "sda1", "mmcblk0p1", 或 GPT 别名 */
-              disk_name(bdev->bd_disk, bdev->bd_partno, name);
+          	/* Obtain a stable device/partition name */
+          	disk_name(bdev->bd_disk, bdev->bd_partno, name);
           
-              /* 去掉 A/B 尾缀 */
-              trim_ab_suffix(name);
+          	/* Normalize A/B suffix */
+          	trim_ab_suffix(name);
           
-              for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
-                  if (!strcmp(name, qcom_core_parts[i]))
-                      return true;
+          	/* radio/firmware core */
+          	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
+          		if (!strcmp(name, qcom_core_parts[i]))
+          			return true;
           
           #if BB_PROTECT_BOOTIMG
-              for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++)
-                  if (!strcmp(name, bootimg_parts[i]))
-                      return true;
+          	for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++)
+          		if (!strcmp(name, bootimg_parts[i]))
+          			return true;
           #endif
-              return false;
+          	return false;
           }
-
           
           static int deny(const char *why)
           {
@@ -470,7 +470,7 @@ jobs:
           		return deny("open wholedisk writable");
           #endif
           
-          	/* deny writes to protected partitions, matched via GPT PARTNAME */
+          	/* deny writes to protected partitions, matched via device name */
           	if (is_protected_bdev(bdev))
           		return deny("open protected partition writable");
           
@@ -560,8 +560,9 @@ jobs:
           };
           
           MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (no runtime knobs)");
-          MODULE_AUTHOR("秋刀鱼");
+          MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
+
 
           EOF
 
