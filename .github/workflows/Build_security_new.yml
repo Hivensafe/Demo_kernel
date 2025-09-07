@@ -266,19 +266,20 @@ jobs:
           cat > security/baseband_guard.c <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           /*
-           * baseband_guard: Minimal LSM to deny writes to critical baseband/bootloader partitions
+           * baseband_guard: LSM to deny actual writes to critical baseband/bootloader partitions
            * - No timers, no directory walks, no genhd.h
            * - One-time on-demand resolution via lookup_bdev(path, &dev_t)
-           * - Deny only on protected partitions; do not touch whole-disk/dm-* by default
+           * - Do NOT block at open time (avoids O_RDWR readers breaking modem bringup)
+           * - Block only when a write is attempted (file_permission with MAY_WRITE)
            */
           
           #include <linux/module.h>
           #include <linux/init.h>
           #include <linux/security.h>
           #include <linux/lsm_hooks.h>
-          #include <linux/fs.h>
+          #include <linux/fs.h>        /* MAY_* */
           #include <linux/namei.h>
-          #include <linux/blkdev.h>     /* lookup_bdev */
+          #include <linux/blkdev.h>    /* lookup_bdev */
           #include <linux/blk_types.h>
           #include <linux/slab.h>
           #include <linux/hashtable.h>
@@ -309,16 +310,15 @@ jobs:
           #define BB_VERBOSE 0
           #endif
           
-          /* === configuration === */
           #define BB_BYNAME_DIR "/dev/block/by-name"
           
-          /* 受保护分区名（按需增减） */
+          /* Protect list (trim as you prefer) */
           static const char * const qcom_core_parts[] = {
           	"modem","modemst1","modemst2","fsg","fsc",
           	"xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
           	"keymaster","devcfg","uefisecapp","qupfw","featenabler",
           	"vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_system_ext",
-          	"bluetooth","dsp","cdsp","keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp",
+          	"bluetooth","dsp","cdsp","keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp","ocdt",
           };
           
           #if BB_PROTECT_BOOTIMG
@@ -327,12 +327,11 @@ jobs:
           };
           #endif
           
-          /* === tiny cache of protected dev_t === */
+          /* tiny cache of protected dev_t */
           struct bbg_node { dev_t dev; struct hlist_node h; };
-          DEFINE_HASHTABLE(bbg_protected_devs, 7); /* 128 buckets 足够 */
-          static bool bbg_cache_built; /* 一次性构建标志 */
+          DEFINE_HASHTABLE(bbg_protected_devs, 7); /* 128 buckets */
+          static bool bbg_cache_built;
           
-          /* === helpers === */
           static bool in_recovery_mode(void)
           {
           #if BB_ALLOW_IN_RECOVERY
@@ -340,13 +339,6 @@ jobs:
           	if (strstr(saved_command_line, "androidboot.mode=recovery")) return true;
           #endif
           	return false;
-          }
-          
-          static bool is_write_open(const struct file *file)
-          {
-          	if (!file) return false;
-          	if (file->f_mode & FMODE_WRITE) return true;
-          	return ((file->f_flags & O_ACCMODE) != O_RDONLY);
           }
           
           static bool cache_has(dev_t dev)
@@ -370,23 +362,19 @@ jobs:
           #endif
           }
           
-          /* 解析 /dev/block/by-name/<name> 为 dev_t（6.6: lookup_bdev 返回 dev_t） */
+          /* 6.6 API: lookup_bdev(path, &dev_t) */
           static bool resolve_byname_dev(const char *name, dev_t *out)
           {
           	char *path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
-          	dev_t dev;
-          	int ret;
-          	if (!path)
-          		return false;
-          	ret = lookup_bdev(path, &dev);  /* 6.6 API */
+          	dev_t dev; int ret;
+          	if (!path) return false;
+          	ret = lookup_bdev(path, &dev);
           	kfree(path);
-          	if (ret)
-          		return false;
+          	if (ret) return false;
           	*out = dev;
           	return true;
           }
           
-          /* 从 cmdline 读取当前槽位后缀（_a/_b），减少解析次数 */
           static const char *slot_suffix_from_cmdline(void)
           {
           	const char *p = saved_command_line;
@@ -394,34 +382,25 @@ jobs:
           	p = strstr(p, "androidboot.slot_suffix=");
           	if (!p) return NULL;
           	p += strlen("androidboot.slot_suffix=");
-          	/* 允许 "_a\0"、"_a " 这种形式 */
-          	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b')) {
-          		return (p[1] == 'a') ? "_a" : "_b";
-          	}
+          	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b')) return (p[1] == 'a') ? "_a" : "_b";
           	return NULL;
           }
           
-          /* 一次性构建缓存：仅在第一次“写打开”任意块设备时执行；不遍历目录，只解析少量固定名 */
+          /* Build cache once (on-demand) */
           static void build_cache_once(void)
           {
-          	const char *suf = slot_suffix_from_cmdline(); /* 可能是 "_a"/"_b"/NULL */
+          	const char *suf = slot_suffix_from_cmdline(); /* "_a"/"_b"/NULL */
           	size_t i; dev_t dev;
           
           	if (READ_ONCE(bbg_cache_built))
           		return;
           
-          	/* core parts */
           	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++) {
           		const char *n = qcom_core_parts[i];
-          		/* 基本名 */
           		if (resolve_byname_dev(n, &dev)) cache_add(dev);
-          		/* A/B 槽：优先解析当前槽位，若未知则解析两槽 */
           		if (suf) {
           			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
-          			if (nm) {
-          				if (resolve_byname_dev(nm, &dev)) cache_add(dev);
-          				kfree(nm);
-          			}
+          			if (nm) { if (resolve_byname_dev(nm, &dev)) cache_add(dev); kfree(nm); }
           		} else {
           			char *na = kasprintf(GFP_KERNEL, "%s_a", n);
           			char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
@@ -436,10 +415,7 @@ jobs:
           		if (resolve_byname_dev(n, &dev)) cache_add(dev);
           		if (suf) {
           			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
-          			if (nm) {
-          				if (resolve_byname_dev(nm, &dev)) cache_add(dev);
-          				kfree(nm);
-          			}
+          			if (nm) { if (resolve_byname_dev(nm, &dev)) cache_add(dev); kfree(nm); }
           		} else {
           			char *na = kasprintf(GFP_KERNEL, "%s_a", n);
           			char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
@@ -469,7 +445,7 @@ jobs:
           	return -EPERM;
           }
           
-          /* 仅在受保护分区上拦破坏性 ioctl（整盘默认不拦，避免影响系统） */
+          /* Destructive ioctls: optional guard */
           static bool is_destructive_ioctl(unsigned int cmd)
           {
           	switch (cmd) {
@@ -497,26 +473,32 @@ jobs:
           	}
           }
           
-          /* === LSM hooks === */
+          /* === LSM hooks ===
+           * NOTE: we DO NOT block at open time; only on actual write attempts.
+           */
           
-          static int bb_file_open(struct file *file)
+          /* When a read/write op is about to be performed, kernel checks permissions */
+          static int bb_file_permission(struct file *file, int mask)
           {
           	struct inode *inode;
           
-          	if (!file) return 0;
-          	inode = file_inode(file);
-          
-          	/* 只关心“以写方式”打开的块设备 */
-          	if (!S_ISBLK(inode->i_mode) || !is_write_open(file))
+          	/* only care about write attempts on block devices */
+          	if (!(mask & MAY_WRITE))
+          		return 0;
+          	if (!file)
           		return 0;
           
-          	/* 第一次触发时构建缓存（解析固定少量名字），无计时、无目录遍历 */
+          	inode = file_inode(file);
+          	if (!S_ISBLK(inode->i_mode))
+          		return 0;
+          
+          	/* build cache on first need (no timers/dir walks) */
           	if (!READ_ONCE(bbg_cache_built))
           		build_cache_once();
           
-          	/* 命中则拒绝 */
+          	/* deny writes to protected partitions */
           	if (cache_has(inode->i_rdev))
-          		return deny("open protected partition writable");
+          		return deny("write to protected partition");
           
           	return 0;
           }
@@ -525,12 +507,13 @@ jobs:
           {
           	struct inode *inode;
           
-          	if (!file) return 0;
+          	if (!file)
+          		return 0;
           	inode = file_inode(file);
           	if (!S_ISBLK(inode->i_mode))
           		return 0;
           
-          	/* 仅在受保护分区上拦破坏性 ioctl */
+          	/* Optional: block destructive ioctls on protected partitions */
           	if (cache_has(inode->i_rdev) && is_destructive_ioctl(cmd))
           		return deny("destructive ioctl on protected partition");
           
@@ -545,7 +528,7 @@ jobs:
           #endif
           
           static struct security_hook_list bb_hooks[] = {
-          	LSM_HOOK_INIT(file_open, bb_file_open),
+          	LSM_HOOK_INIT(file_permission, bb_file_permission),
           	LSM_HOOK_INIT(file_ioctl, bb_file_ioctl),
           #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
           	LSM_HOOK_INIT(file_ioctl_compat, bb_file_ioctl_compat),
@@ -556,7 +539,7 @@ jobs:
           {
           	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
           #if BB_VERBOSE
-          	pr_info("baseband_guard: initialized (ENFORCING), on-demand cache build\n");
+          	pr_info("baseband_guard: initialized (ENFORCING), guarding at write-time only\n");
           #endif
           	return 0;
           }
@@ -566,10 +549,9 @@ jobs:
           	.init = bb_init,
           };
           
-          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (on-demand lookup_bdev cache; no timers/dir walks)");
+          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (deny at write-time; no open-time denial)");
           MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
-
 
           EOF
 
