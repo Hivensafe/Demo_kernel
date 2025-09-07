@@ -288,7 +288,6 @@ jobs:
           #include <linux/dcache.h>
           #include <linux/blkdev.h>
           #include <linux/blk_types.h>
-          #include <linux/genhd.h>     /* struct hd_struct, gendisk */
           #include <linux/cred.h>
           #include <linux/limits.h>
           #include <linux/string.h>
@@ -409,35 +408,30 @@ jobs:
           /* Read GPT PARTNAME from bd_part->info->volname and match our lists */
           static bool is_protected_bdev(struct block_device *bdev)
           {
-          	const struct hd_struct *part;
-          	char name[64];
-          	size_t i;
+              char name[64];
+              size_t i;
           
-          	if (!bdev)
-          		return false;
+              if (!bdev || !bdev->bd_disk)
+                  return false;
           
-          	part = bdev->bd_part;              /* NULL => whole disk; non-NULL => a partition */
-          	if (!part || !part->info)
-          		return false;               /* whole disk or no info => not matched here */
+              /* disk_name 会返回分区名，如 "sda", "sda1", "mmcblk0p1", 或 GPT 别名 */
+              disk_name(bdev->bd_disk, bdev->bd_partno, name);
           
-          	if (!part->info->volname[0])
-          		return false;               /* no PARTNAME */
+              /* 去掉 A/B 尾缀 */
+              trim_ab_suffix(name);
           
-          	strscpy(name, part->info->volname, sizeof(name));
-          	trim_ab_suffix(name);
-          
-          	/* radio/firmware */
-          	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
-          		if (!strcmp(name, qcom_core_parts[i]))
-          			return true;
+              for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
+                  if (!strcmp(name, qcom_core_parts[i]))
+                      return true;
           
           #if BB_PROTECT_BOOTIMG
-          	for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++)
-          		if (!strcmp(name, bootimg_parts[i]))
-          			return true;
+              for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++)
+                  if (!strcmp(name, bootimg_parts[i]))
+                      return true;
           #endif
-          	return false;
+              return false;
           }
+
           
           static int deny(const char *why)
           {
@@ -777,6 +771,7 @@ jobs:
           DEF=./common/arch/arm64/configs/gki_defconfig
           {
             echo 'CONFIG_SECURITY_BASEBAND_GUARD=y'
+            echo 'CONFIG_SECURITYFS=y'
             echo 'CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY=y'
             echo 'CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG=y'
             echo 'CONFIG_SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK=y'
