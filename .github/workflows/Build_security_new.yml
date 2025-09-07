@@ -267,19 +267,28 @@ jobs:
           // SPDX-License-Identifier: GPL-2.0
           /*
            * baseband_guard: LSM to protect critical baseband/bootloader partitions
-           * Target: Android common kernel 6.6 (sm8750)
+           * Target: Android common kernel 6.6 (sm8750 and similar)
            *
            * Runtime is always ENFORCING. No sysfs/module parameters are created.
+           * Strategy:
+           *   - Block writable open on protected partitions by matching GPT PARTNAME
+           *     from bdev->bd_part->info->volname (more robust than /by-name paths).
+           *   - Optionally block writable open on whole-disk nodes.
+           *   - Block destructive block IOCTLs.
+           *   - Optionally allow writes in recovery based on cmdline (compile-time).
            */
+          
           #include <linux/module.h>
           #include <linux/init.h>
           #include <linux/security.h>
           #include <linux/lsm_hooks.h>
           #include <linux/fs.h>
+          #include <linux/fcntl.h>     /* O_ACCMODE, O_RDONLY */
           #include <linux/namei.h>
           #include <linux/dcache.h>
           #include <linux/blkdev.h>
           #include <linux/blk_types.h>
+          #include <linux/genhd.h>     /* struct hd_struct, gendisk */
           #include <linux/cred.h>
           #include <linux/limits.h>
           #include <linux/string.h>
@@ -287,13 +296,13 @@ jobs:
           #include <linux/errno.h>
           #include <linux/version.h>
           #ifdef CONFIG_BLK_DEV_INITRD
-          #include <linux/blkpg.h>   /* may define BLKPG on some configs */
+          #include <linux/blkpg.h>     /* BLKPG on some configs */
           #endif
           
-          /* your tree declares it as char*, not const */
+          /* In your tree it's declared as char*, not const */
           extern char *saved_command_line; /* from init/main.c */
           
-          /* Compile-time policy (no runtime knobs) */
+          /* -------- Compile-time policy (no runtime knobs) -------- */
           #define BB_ENFORCING                 1
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY
           #define BB_ALLOW_IN_RECOVERY         1
@@ -316,233 +325,250 @@ jobs:
           #define BB_VERBOSE                   0
           #endif
           
-          /* Common Qualcomm sm8750 sensitive partitions */
+          /* -------- Protected partition name lists (without _a/_b) -------- */
           static const char * const qcom_core_parts[] = {
-              /* baseband + calibration */
-              "modem","modemst1","modemst2","fsg","fsc","bluetooth",
-              "dsp","cdsp","qweslicstore","qweslicstorebak",
-              /* boot chain / firmware */
-              "xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
-              "keymaster","devcfg","uefisecapp","qupfw","featenabler",
-              "vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_system_ext",
-              /* misc binding */
-              "keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp",
+          	/* baseband + calibration */
+          	"modem", "modemst1", "modemst2", "fsg", "fsc", "bluetooth",
+          	"dsp", "cdsp", "qweslicstore", "qweslicstorebak",
+          	/* boot chain / firmware */
+          	"xbl", "xbl_config", "abl", "tz", "hyp", "cmnlib", "cmnlib64",
+          	"keymaster", "devcfg", "uefisecapp", "qupfw", "featenabler",
+          	"vbmeta", "vbmeta_system", "vbmeta_vendor", "vbmeta_system_ext",
+          	/* misc binding */
+          	"keystore", "rpm", "rpmfw", "uefi", "spunvm", "apdp", "msadp","ocdt",
           };
           
           static const char * const bootimg_parts[] = {
-              "boot","dtbo","vendor_boot","init_boot","recovery"
+          	"boot", "dtbo", "vendor_boot", "init_boot", "recovery"
           };
           
-          /* Whole-disk device name prefixes (gendisk->disk_name) */
-          static const char * const wholedisk_prefixes[] = { "sda", "sdb", "mmcblk", "nvme", "dm-" };
+          /* whole-disk nodes by disk_name prefix (gendisk->disk_name) */
+          static const char * const wholedisk_prefixes[] = {
+          	"sda", "sdb", "mmcblk", "nvme", "dm-"
+          };
+          
+          /* -------- Helpers -------- */
           
           static bool in_recovery_mode(void)
           {
           #if BB_ALLOW_IN_RECOVERY
-              if (!saved_command_line)
-                  return false;
-              if (strstr(saved_command_line, "androidboot.mode=recovery"))
-                  return true;
-              if (strstr(saved_command_line, "skip_initramfs=1") && strstr(saved_command_line, "recovery"))
-                  return true;
+          	if (!saved_command_line)
+          		return false;
+          	if (strstr(saved_command_line, "androidboot.mode=recovery"))
+          		return true;
+          	/* Some recovery boots set keywords with skip_initramfs and "recovery" */
+          	if (strstr(saved_command_line, "skip_initramfs=1") &&
+          	    strstr(saved_command_line, "recovery"))
+          		return true;
           #endif
-              return false;
+          	return false;
           }
           
-          static bool is_write_flags(unsigned int fmode)
+          static bool is_write_open(const struct file *file)
           {
-              /* some trees may not define FMODE_APPEND; write is what we need */
-              return (fmode & FMODE_WRITE);
+          	if (!file)
+          		return false;
+          	if (file->f_mode & FMODE_WRITE)
+          		return true;
+          	/* Extra guard in case some trees rely on f_flags */
+          	return ((file->f_flags & O_ACCMODE) != O_RDONLY);
           }
-          
-          static bool is_protected_byname(const char *path)
-          {
-              size_t i;
-              const char *base, *slash;
-              char name[64];
-              size_t len;
-          
-              if (!path)
-                  return false;
-          
-              /* 只处理 by-name 路径，减少误判 */
-              if (!strstr(path, "/by-name/"))
-                  return false;
-          
-              slash = strrchr(path, '/');
-              base  = slash ? slash + 1 : path;
-          
-              /* 安全复制 basename，并去掉 _a/_b 尾缀（A/B 分区） */
-              len = strnlen(base, sizeof(name) - 1);
-              memcpy(name, base, len);
-              name[len] = '\0';
-              if (len > 2 && name[len-2] == '_' && (name[len-1] == 'a' || name[len-1] == 'b')) {
-                  name[len-2] = '\0';
-              }
-          
-              for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
-                  if (!strcmp(name, qcom_core_parts[i]))
-                      return true;
-          
-          #if BB_PROTECT_BOOTIMG
-              for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++)
-                  if (!strcmp(name, bootimg_parts[i]))
-                      return true;
-          #endif
-              return false;
-          }
-
           
           static bool is_wholedisk(struct block_device *bdev)
           {
-              size_t i;
-              const char *dn;
-              if (!bdev || !bdev->bd_disk)
-                  return false;
-              dn = bdev->bd_disk->disk_name;
-              if (!dn)
-                  return false;
-              for (i = 0; i < ARRAY_SIZE(wholedisk_prefixes); i++)
-                  if (!strncmp(dn, wholedisk_prefixes[i], strlen(wholedisk_prefixes[i])))
-                      return true;
-              return false;
+          	size_t i;
+          	const char *dn;
+          
+          	if (!bdev || !bdev->bd_disk)
+          		return false;
+          
+          	dn = bdev->bd_disk->disk_name;
+          	if (!dn)
+          		return false;
+          
+          	for (i = 0; i < ARRAY_SIZE(wholedisk_prefixes); i++)
+          		if (!strncmp(dn, wholedisk_prefixes[i],
+          			     strlen(wholedisk_prefixes[i])))
+          			return true;
+          	return false;
+          }
+          
+          static void trim_ab_suffix(char *s)
+          {
+          	size_t len;
+          
+          	if (!s)
+          		return;
+          	len = strnlen(s, 63);
+          	if (len > 2 && s[len - 2] == '_' &&
+          	    (s[len - 1] == 'a' || s[len - 1] == 'b')) {
+          		s[len - 2] = '\0';
+          	}
+          }
+          
+          /* Read GPT PARTNAME from bd_part->info->volname and match our lists */
+          static bool is_protected_bdev(struct block_device *bdev)
+          {
+          	const struct hd_struct *part;
+          	char name[64];
+          	size_t i;
+          
+          	if (!bdev)
+          		return false;
+          
+          	part = bdev->bd_part;              /* NULL => whole disk; non-NULL => a partition */
+          	if (!part || !part->info)
+          		return false;               /* whole disk or no info => not matched here */
+          
+          	if (!part->info->volname[0])
+          		return false;               /* no PARTNAME */
+          
+          	strscpy(name, part->info->volname, sizeof(name));
+          	trim_ab_suffix(name);
+          
+          	/* radio/firmware */
+          	for (i = 0; i < ARRAY_SIZE(qcom_core_parts); i++)
+          		if (!strcmp(name, qcom_core_parts[i]))
+          			return true;
+          
+          #if BB_PROTECT_BOOTIMG
+          	for (i = 0; i < ARRAY_SIZE(bootimg_parts); i++)
+          		if (!strcmp(name, bootimg_parts[i]))
+          			return true;
+          #endif
+          	return false;
           }
           
           static int deny(const char *why)
           {
-              if (!BB_ENFORCING)
-                  return 0;
-              if (BB_ALLOW_IN_RECOVERY && in_recovery_mode())
-                  return 0;
+          	if (!BB_ENFORCING)
+          		return 0;
+          	if (BB_ALLOW_IN_RECOVERY && in_recovery_mode())
+          		return 0;
           #if BB_VERBOSE
-              pr_info("baseband_guard: deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
+          	pr_info("baseband_guard: deny %s pid=%d comm=%s\n",
+          		why, current->pid, current->comm);
           #endif
-              return -EPERM;
+          	return -EPERM;
           }
+          
+          /* -------- LSM hooks -------- */
           
           static int bb_file_open(struct file *file)
           {
-              char *tmp = NULL;
-              char *path = NULL;
-              int rc = 0;
-              struct inode *inode;
-              struct block_device *bdev;
+          	struct inode *inode;
+          	struct block_device *bdev;
           
-              if (!file)
-                  return 0;
-              inode = file_inode(file);
+          	if (!file)
+          		return 0;
           
-              /* Only care about block devices opened writable */
-              if (!S_ISBLK(inode->i_mode) || !is_write_flags(file->f_mode))
-                  return 0;
+          	inode = file_inode(file);
           
-              /* Whole-disk guard */
-              bdev = I_BDEV(inode);
+          	/* Only care about block devices opened writable */
+          	if (!S_ISBLK(inode->i_mode) || !is_write_open(file))
+          		return 0;
+          
+          	bdev = I_BDEV(inode);
+          
           #if BB_BLOCK_WHOLEDISK
-              if (is_wholedisk(bdev))
-                  return deny("open wholedisk writable");
+          	/* deny writes on raw whole-disk nodes to prevent bypass */
+          	if (is_wholedisk(bdev))
+          		return deny("open wholedisk writable");
           #endif
           
-              tmp = (char *)__get_free_page(GFP_KERNEL);
-              if (!tmp)
-                  return 0; /* fail-open if memory constrained */
-              path = d_path(&file->f_path, tmp, PAGE_SIZE);
-              if (IS_ERR(path))
-                  goto out;
+          	/* deny writes to protected partitions, matched via GPT PARTNAME */
+          	if (is_protected_bdev(bdev))
+          		return deny("open protected partition writable");
           
-              if (is_protected_byname(path))
-                  rc = deny("open protected by-name writable");
-          
-          out:
-              free_page((unsigned long)tmp);
-              return rc;
+          	return 0;
           }
           
           /* Block destructive ioctls even if someone opened read-only but issues ioctl */
           static bool is_destructive_ioctl(unsigned int cmd)
           {
-              switch (cmd) {
-              case BLKDISCARD:
-              case BLKSECDISCARD:
-              case BLKZEROOUT:
+          	switch (cmd) {
+          	case BLKDISCARD:
+          	case BLKSECDISCARD:
+          	case BLKZEROOUT:
           #ifdef BLKDISCARDZEROES
-              case BLKDISCARDZEROES:
+          	case BLKDISCARDZEROES:
           #endif
           #ifdef BLKPG
-              case BLKPG:
+          	case BLKPG:
           #endif
           #ifdef BLKTRIM
-              case BLKTRIM:
+          	case BLKTRIM:
           #endif
           #ifdef BLKRESETZONE
-              case BLKRESETZONE:
+          	case BLKRESETZONE:
           #endif
           #ifdef BLKOPENZONE
-              case BLKOPENZONE:
+          	case BLKOPENZONE:
           #endif
           #ifdef BLKCLOSEZONE
-              case BLKCLOSEZONE:
+          	case BLKCLOSEZONE:
           #endif
           #ifdef BLKRMZGROUP
-              case BLKRMZGROUP:
+          	case BLKRMZGROUP:
           #endif
           #ifdef BLKSETRO
-              case BLKSETRO:
+          	case BLKSETRO:
           #endif
           #ifdef BLKROSET
-              case BLKROSET:
+          	case BLKROSET:
           #endif
           #ifdef BLKSETBADSECTORS
-              case BLKSETBADSECTORS:
+          	case BLKSETBADSECTORS:
           #endif
-              case BLKRRPART:
-                  return true;
-              default:
-                  return false;
-              }
+          	case BLKRRPART:
+          		return true;
+          	default:
+          		return false;
+          	}
           }
           
           static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
           {
-              if (is_destructive_ioctl(cmd))
-                  return deny("destructive ioctl");
-              return 0;
+          	if (is_destructive_ioctl(cmd))
+          		return deny("destructive ioctl");
+          	return 0;
           }
           
           #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
           static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned long arg)
           {
-              return bb_file_ioctl(file, cmd, arg);
+          	return bb_file_ioctl(file, cmd, arg);
           }
           #endif
           
-          /* drop __lsm_ro_after_init for portability */
+          /* Avoid __lsm_ro_after_init for portability across vendor trees */
           static struct security_hook_list bb_hooks[] = {
-              LSM_HOOK_INIT(file_open, bb_file_open),
-              LSM_HOOK_INIT(file_ioctl, bb_file_ioctl),
+          	LSM_HOOK_INIT(file_open, bb_file_open),
+          	LSM_HOOK_INIT(file_ioctl, bb_file_ioctl),
           #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
-              LSM_HOOK_INIT(file_ioctl_compat, bb_file_ioctl_compat),
+          	LSM_HOOK_INIT(file_ioctl_compat, bb_file_ioctl_compat),
           #endif
           };
           
           static int __init bb_init(void)
           {
-              security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
+          	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
           #if BB_VERBOSE
-              pr_info("baseband_guard: initialized (always ENFORCING), allow_in_recovery=%d, block_wholedisk=%d\n",
-                  (int)BB_ALLOW_IN_RECOVERY, (int)BB_BLOCK_WHOLEDISK);
+          	pr_info("baseband_guard: initialized (ENFORCING), allow_in_recovery=%d, block_wholedisk=%d\n",
+          		(int)BB_ALLOW_IN_RECOVERY, (int)BB_BLOCK_WHOLEDISK);
           #endif
-              return 0;
+          	return 0;
           }
           
           DEFINE_LSM(baseband_guard) = {
-              .name = "baseband_guard",
-              .init = bb_init,
+          	.name = "baseband_guard",
+          	.init = bb_init,
           };
           
           MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (no runtime knobs)");
-          MODULE_AUTHOR("秋刀鱼 + ChatGPT");
+          MODULE_AUTHOR("秋刀鱼");
           MODULE_LICENSE("GPL v2");
+
           EOF
 
           set -euo pipefail
