@@ -268,7 +268,7 @@ jobs:
           /*
            * baseband_guard: LSM to protect critical baseband/bootloader partitions
            * Strategy (no genhd.h dependencies):
-           *   - At init, walk a fixed allowlist of partition names (and _a/_b variants),
+           *   - After boot, delay then walk a fixed allowlist of partition names (and _a/_b),
            *     resolve /dev/block/by-name/<part> symlinks to real block devices,
            *     record their dev_t (major:minor) into a kernel hashtable.
            *   - On file_open, if a block device is opened writable and its i_rdev is in
@@ -297,6 +297,7 @@ jobs:
           #include <linux/slab.h>
           #include <linux/hashtable.h>
           #include <linux/uaccess.h>
+          #include <linux/workqueue.h>
           
           extern char *saved_command_line; /* from init/main.c */
           
@@ -327,6 +328,11 @@ jobs:
           #define BB_VERBOSE                   0
           #endif
           
+          /* ===== Delayed scan config ===== */
+          #define BBG_SCAN_DELAY_MS      60000   /* 首次延迟：60s */
+          #define BBG_SCAN_RETRY_MS       5000   /* 失败重试间隔：5s */
+          #define BBG_SCAN_MAX_RETRY        20   /* 最多重试 20 次（共 ~100s） */
+          
           /* ===== Constants ===== */
           #define BB_BYNAME_DIR   "/dev/block/by-name"
           
@@ -340,7 +346,7 @@ jobs:
           	"keymaster","devcfg","uefisecapp","qupfw","featenabler",
           	"vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_system_ext",
           	/* misc binding */
-          	"keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp","ocdt"
+          	"keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp",
           };
           
           static const char * const bootimg_parts[] = {
@@ -448,7 +454,7 @@ jobs:
           	return -EPERM;
           }
           
-          /* ===== by-name scanning without genhd: resolve symlinks and collect dev_t ===== */
+          /* ===== by-name scanning (resolve symlinks and collect dev_t) ===== */
           
           static int bbg_try_add_one(const char *name)
           {
@@ -511,6 +517,40 @@ jobs:
           		}
           	}
           #endif
+          }
+          
+          /* ===== Delayed scan control (failure-only retry) ===== */
+          static struct delayed_work bbg_scan_work;
+          static atomic_t bbg_scan_done = ATOMIC_INIT(0);
+          static int bbg_scan_retries;
+          
+          static int bbg_protected_count(void)
+          {
+          	struct bbg_node *cur; unsigned bkt; int n = 0;
+          	hash_for_each(bbg_protected_devs, bkt, cur, h) n++;
+          	return n;
+          }
+          
+          static void bbg_scan_worker(struct work_struct *ws)
+          {
+          	int before = bbg_protected_count();
+          	bbg_scan_byname_fixedlist();
+          	if (bbg_protected_count() > before) {
+          		atomic_set(&bbg_scan_done, 1);
+          #if BB_VERBOSE
+          		pr_info("baseband_guard: scan OK, protected=%d\n", bbg_protected_count());
+          #endif
+          	} else if (++bbg_scan_retries < BBG_SCAN_MAX_RETRY) {
+          		schedule_delayed_work(&bbg_scan_work, msecs_to_jiffies(BBG_SCAN_RETRY_MS));
+          #if BB_VERBOSE
+          		pr_info("baseband_guard: scan retry %d (by-name not ready?)\n", bbg_scan_retries);
+          #endif
+          	} else {
+          		atomic_set(&bbg_scan_done, 1);
+          #if BB_VERBOSE
+          		pr_info("baseband_guard: scan give up, protected=%d\n", bbg_protected_count());
+          #endif
+          	}
           }
           
           /* ===== LSM hooks ===== */
@@ -645,13 +685,17 @@ jobs:
           {
           	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
           
-          	/* Build the protected dev_t set once at boot */
-          	bbg_scan_byname_fixedlist();
+          	/* 延迟扫描 /dev/block/by-name（避免 early 阶段尚未就绪） */
+          	INIT_DELAYED_WORK(&bbg_scan_work, bbg_scan_worker);
+          	schedule_delayed_work(&bbg_scan_work, msecs_to_jiffies(BBG_SCAN_DELAY_MS));
           
           #if BB_VERBOSE
           	pr_info("baseband_guard: initialized (always ENFORCING), "
-          		"allow_in_recovery=%d, block_wholedisk=%d\n",
-          		(int)BB_ALLOW_IN_RECOVERY, (int)BB_BLOCK_WHOLEDISK);
+          		"allow_in_recovery=%d, block_wholedisk=%d, delayed_scan=%ums\n",
+          		(int)BB_ALLOW_IN_RECOVERY, (int)BB_BLOCK_WHOLEDISK,
+          		(unsigned)BBG_SCAN_DELAY_MS);
+          	pr_info("baseband_guard: scan retry policy: %ums x %d (failure-only)\n",
+          		(unsigned)BBG_SCAN_RETRY_MS, (int)BBG_SCAN_MAX_RETRY);
           #endif
           	return 0;
           }
@@ -661,9 +705,10 @@ jobs:
           	.init = bb_init,
           };
           
-          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (dev_t-based, no genhd deps, no runtime knobs)");
+          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (dev_t-based, delayed scan, no genhd deps, no runtime knobs)");
           MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
+
 
           EOF
 
