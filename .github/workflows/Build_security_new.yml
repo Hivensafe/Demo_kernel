@@ -272,7 +272,7 @@ jobs:
            * - On-demand initial build via lookup_bdev(path, &dev_t)
            * - Late /dev/block/by-name nodes handled by throttled retries on cache miss
            * - Verbose logs per name: [OK]/[MISS] at initial build; [RETRY-OK] on later success
-           * - Plan A: first write is denied too via dentry-name fallback, and current dev_t cached
+           * - First write also denied via DEV-MATCH fallback: reverse match current inode->i_rdev
            */
           
           #include <linux/module.h>
@@ -343,8 +343,8 @@ jobs:
           static bool bbg_cache_built;             /* 首次构建完成标志 */
           
           /* 按需重试的软节流（无定时器） */
-          static unsigned long bbg_retry_jiffies;                 /* 上次重试时间 */
-          static const unsigned long bbg_retry_min_interval = HZ/5; /* 约 200ms */
+          static unsigned long bbg_retry_jiffies;                  /* 上次重试时间 */
+          static const unsigned long bbg_retry_min_interval = HZ/5;/* 约 200ms */
           
           /* ======== 帮助函数 ======== */
           static bool in_recovery_mode(void)
@@ -533,13 +533,10 @@ jobs:
           /* ========= LSM Hooks =========
            * 只在写路径拒绝：避免 O_RDWR 只读访问受影响（例如调制解调器初始化）
            */
-          
           static int bb_file_permission(struct file *file, int mask)
           {
           	struct inode *inode;
-          	const char *nm;
-          	size_t nlen, i;
-          	char base[64];
+          	size_t i;
           
           	if (!(mask & MAY_WRITE))    /* 只拦真正的写操作 */
           		return 0;
@@ -558,24 +555,35 @@ jobs:
           	if (cache_has(inode->i_rdev))
           		return deny("write to protected partition");
           
-          	/* ===== A) 兜底：基于 dentry 名即时匹配（首写也能挡） =====
-          	 * 取最后一级名字，去掉 _a/_b 槽位后缀，与清单 core_names[] 比较。
-          	 * 若命中：当场把当前 dev_t 缓存起来，并直接拒绝本次写。
+          	/* ===== A) DEV-MATCH 兜底：首写也能挡 =====
+          	 * 反向用当前 inode->i_rdev 去匹配 core_names[]（含 _a/_b 变体）的实际 dev_t。
+          	 * 命中则当场加入缓存并拒绝本次写。
           	 */
-          	nm = file->f_path.dentry->d_name.name;
-          	nlen = strlen(nm);
-          	if (nlen < sizeof(base)) {
-          		strcpy(base, nm);
-          		if (nlen > 2 && base[nlen-2] == '_' && (base[nlen-1] == 'a' || base[nlen-1] == 'b'))
-          			base[nlen-2] = '\0';
+          	{
+          		const char *suf = slot_suffix_from_cmdline();
+          		dev_t d;
           		for (i = 0; i < core_names_cnt; i++) {
-          			if (strcmp(base, core_names[i].name) == 0) {
-          				cache_add(inode->i_rdev);  /* 顺带把当前设备号加入缓存，后续稳定命中 */
+          			const char *n = core_names[i].name;
+          			bool hit = false;
+          
+          			if (resolve_byname_dev(n, &d) && d == inode->i_rdev) hit = true;
+          			if (!hit && suf) {
+          				char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
+          				if (nm) { if (resolve_byname_dev(nm, &d) && d == inode->i_rdev) hit = true; kfree(nm); }
+          			} else if (!hit) {
+          				char *na = kasprintf(GFP_KERNEL, "%s_a", n);
+          				char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
+          				if (na) { if (resolve_byname_dev(na, &d) && d == inode->i_rdev) hit = true; kfree(na); }
+          				if (!hit && nb) { if (resolve_byname_dev(nb, &d) && d == inode->i_rdev) hit = true; kfree(nb); }
+          			}
+          
+          			if (hit) {
+          				cache_add(inode->i_rdev);
           #if BB_VERBOSE
-          				pr_info("baseband_guard: [DENTRY] hit %s -> protect current dev %u:%u\n",
-          					base, MAJOR(inode->i_rdev), MINOR(inode->i_rdev));
+          				pr_info("baseband_guard: [DEV-MATCH] protect current dev %u:%u as %s\n",
+          				        MAJOR(inode->i_rdev), MINOR(inode->i_rdev), n);
           #endif
-          				return deny("write to protected partition (dentry match)");
+          				return deny("write to protected partition (dev match)");
           			}
           		}
           	}
@@ -633,7 +641,7 @@ jobs:
           {
           	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
           #if BB_VERBOSE
-          	pr_info("baseband_guard: init (write-time only; throttled retry on miss + dentry fallback)\n");
+          	pr_info("baseband_guard: init (write-time only; throttled retry on miss + DEV-MATCH fallback)\n");
           #endif
           	return 0;
           }
@@ -643,10 +651,9 @@ jobs:
           	.init = bb_init,
           };
           
-          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (deny at write-time; on-demand build + throttled retry + dentry fallback)");
-          MODULE_AUTHOR("秋刀鱼 + ChatGPT");
+          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (deny at write-time; on-demand build + throttled retry + dev match fallback)");
+          MODULE_AUTHOR("秋刀鱼");
           MODULE_LICENSE("GPL v2");
-
 
           EOF
 
