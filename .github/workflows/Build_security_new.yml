@@ -250,18 +250,18 @@ jobs:
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          # # 防重复 patch
-          # if grep -q 'SOC_SN_CHECK' init/main.c; then
-          #   echo "main.c 已包含 patch, 跳过"
-          #   exit 0
-          # fi
-          # cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
-          # LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
-          # head -n "$LINE" init/main.c > init/main.c.patched
-          # cat serialid_check.c >> init/main.c.patched
-          # tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
-          # mv init/main.c.patched init/main.c
-          # echo "已自动插入 serialid_check.c 到 main.c"
+          # 防重复 patch
+          if grep -q 'SOC_SN_CHECK' init/main.c; then
+            echo "main.c 已包含 patch, 跳过"
+            exit 0
+          fi
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
+          LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
+          head -n "$LINE" init/main.c > init/main.c.patched
+          cat serialid_check.c >> init/main.c.patched
+          tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
+          mv init/main.c.patched init/main.c
+          echo "已自动插入 serialid_check.c 到 main.c"
           
           cat > security/baseband_guard.c <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
