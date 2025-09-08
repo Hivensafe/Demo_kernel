@@ -272,6 +272,7 @@ jobs:
            * - On-demand initial build via lookup_bdev(path, &dev_t)
            * - Late /dev/block/by-name nodes handled by throttled retries on cache miss
            * - Verbose logs per name: [OK]/[MISS] at initial build; [RETRY-OK] on later success
+           * - Plan A: first write is denied too via dentry-name fallback, and current dev_t cached
            */
           
           #include <linux/module.h>
@@ -279,6 +280,7 @@ jobs:
           #include <linux/security.h>
           #include <linux/lsm_hooks.h>
           #include <linux/fs.h>        /* MAY_* */
+          #include <linux/dcache.h>
           #include <linux/namei.h>
           #include <linux/blkdev.h>    /* lookup_bdev */
           #include <linux/blk_types.h>
@@ -313,9 +315,10 @@ jobs:
           
           #define BB_BYNAME_DIR "/dev/block/by-name"
           
-          /* ========= 清单：严格受保护（任何写都拒绝） ========= */
+          /* ======== 受保护分区清单 ======== */
           struct name_entry { const char *name; u8 st; };
           enum res_state { RS_UNKNOWN = 0, RS_OK = 1, RS_FAIL = 2 };
+          
           static struct name_entry core_names[] = {
           	{ "xbl", RS_UNKNOWN }, { "xbl_config", RS_UNKNOWN }, { "uefi", RS_UNKNOWN },
           	{ "uefisecapp", RS_UNKNOWN }, { "abl", RS_UNKNOWN },
@@ -334,14 +337,14 @@ jobs:
           };
           static const size_t core_names_cnt = ARRAY_SIZE(core_names);
           
-          /* ========= 受保护 dev_t 小缓存 ========= */
+          /* ======== 受保护 dev_t 缓存 ======== */
           struct bbg_node { dev_t dev; struct hlist_node h; };
           DEFINE_HASHTABLE(bbg_protected_devs, 7); /* 128 buckets */
           static bool bbg_cache_built;             /* 首次构建完成标志 */
           
           /* 按需重试的软节流（无定时器） */
-          static unsigned long bbg_retry_jiffies;                /* 上次重试时间 */
-          static const unsigned long bbg_retry_min_interval = HZ/5; /* 200ms */
+          static unsigned long bbg_retry_jiffies;                 /* 上次重试时间 */
+          static const unsigned long bbg_retry_min_interval = HZ/5; /* 约 200ms */
           
           /* ======== 帮助函数 ======== */
           static bool in_recovery_mode(void)
@@ -534,6 +537,9 @@ jobs:
           static int bb_file_permission(struct file *file, int mask)
           {
           	struct inode *inode;
+          	const char *nm;
+          	size_t nlen, i;
+          	char base[64];
           
           	if (!(mask & MAY_WRITE))    /* 只拦真正的写操作 */
           		return 0;
@@ -552,7 +558,29 @@ jobs:
           	if (cache_has(inode->i_rdev))
           		return deny("write to protected partition");
           
-          	/* 未命中：按需重试（处理 by-name 迟到） */
+          	/* ===== A) 兜底：基于 dentry 名即时匹配（首写也能挡） =====
+          	 * 取最后一级名字，去掉 _a/_b 槽位后缀，与清单 core_names[] 比较。
+          	 * 若命中：当场把当前 dev_t 缓存起来，并直接拒绝本次写。
+          	 */
+          	nm = file->f_path.dentry->d_name.name;
+          	nlen = strlen(nm);
+          	if (nlen < sizeof(base)) {
+          		strcpy(base, nm);
+          		if (nlen > 2 && base[nlen-2] == '_' && (base[nlen-1] == 'a' || base[nlen-1] == 'b'))
+          			base[nlen-2] = '\0';
+          		for (i = 0; i < core_names_cnt; i++) {
+          			if (strcmp(base, core_names[i].name) == 0) {
+          				cache_add(inode->i_rdev);  /* 顺带把当前设备号加入缓存，后续稳定命中 */
+          #if BB_VERBOSE
+          				pr_info("baseband_guard: [DENTRY] hit %s -> protect current dev %u:%u\n",
+          					base, MAJOR(inode->i_rdev), MINOR(inode->i_rdev));
+          #endif
+          				return deny("write to protected partition (dentry match)");
+          			}
+          		}
+          	}
+          
+          	/* B) 未命中：按需重试（处理 by-name 迟到） */
           	if (READ_ONCE(bbg_cache_built))
           		retry_resolve_failed_names_throttled();
           
@@ -605,7 +633,7 @@ jobs:
           {
           	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
           #if BB_VERBOSE
-          	pr_info("baseband_guard: init (write-time only; throttled retry on miss)\n");
+          	pr_info("baseband_guard: init (write-time only; throttled retry on miss + dentry fallback)\n");
           #endif
           	return 0;
           }
@@ -615,9 +643,10 @@ jobs:
           	.init = bb_init,
           };
           
-          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (deny at write-time; on-demand build + throttled retry)");
+          MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (deny at write-time; on-demand build + throttled retry + dentry fallback)");
           MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
+
 
           EOF
 
