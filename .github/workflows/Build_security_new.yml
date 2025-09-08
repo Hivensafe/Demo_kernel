@@ -314,12 +314,14 @@ jobs:
           
           /* Protect list (trim as you prefer) */
           static const char * const qcom_core_parts[] = {
-          	"modem","modemst1","modemst2","fsg","fsc",
-          	"xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
-          	"keymaster","devcfg","uefisecapp","qupfw","featenabler",
-          	"vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_system_ext",
-          	"bluetooth","dsp","cdsp","keystore","rpm","rpmfw","uefi","spunvm","apdp","msadp","ocdt",
-          };
+            "xbl","xbl_config","uefi","uefisecapp","abl",
+            "modem","modemst1","modemst2","fsg","fsc","connsec",
+            "mdm1oemnvbktmp","oplusdycnvbk","oplusstanvbk","nvram",
+            "nvdata","nvcfg","md_sec","sec1","seccfg","vbmeta","vbmeta_system",
+            "vbmeta_vendor","tz","hyp","keymaster","keystore","storsec","secdata",
+            "ssd","pvmfw","vm-bootsys","vm-persist","imagefv","toolsfv","tee","rotfw",
+            "frp","preloader_raw","lk","bootloader1","bootloader2","ocdt",
+           };
           
           #if BB_PROTECT_BOOTIMG
           static const char * const bootimg_parts[] = {
