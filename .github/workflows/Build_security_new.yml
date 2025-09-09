@@ -266,17 +266,11 @@ jobs:
           cat > security/baseband_guard.c <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           /*
-           * baseband_guard_friendly: LSM to deny writes to critical baseband/bootloader partitions
-           * 
-           * Goals vs original version:
-           *  - Same protection guarantees (deny actual writes + destructive ioctls)
-           *  - Zero busy-looping; background retries use exponential backoff and auto-stop
-           *  - Reverse dev_t match kept for first-write denial, but with per-name cooldown to avoid storms
-           *  - Log output is rate-limited and quiet by default (use pr_debug or BB_VERBOSE to turn up)
-           *  - No directory walks; no tight retry in hot paths; no timers with small periods
-           *
-           * Tested ABI assumptions:
-           *  - Linux 6.6: lookup_bdev(const char *path, dev_t *dev)
+           * baseband_guard (quiet & perf-friendly):
+           * - Deny writes to critical partitions at write-time (file_permission + ioctl)
+           * - First-write denial via dev_t reverse-match (no name reliance)
+           * - No timers, no directory walk, fixed-name lookup_bdev only
+           * - Retry is on-demand with exponential backoff; no log spam
            */
           
           #include <linux/module.h>
@@ -284,18 +278,16 @@ jobs:
           #include <linux/security.h>
           #include <linux/lsm_hooks.h>
           #include <linux/fs.h>
-          #include <linux/namei.h>
-          #include <linux/blkdev.h>
+          #include <linux/blkdev.h>    /* lookup_bdev */
           #include <linux/blk_types.h>
           #include <linux/slab.h>
           #include <linux/hashtable.h>
           #include <linux/string.h>
-          #include <linux/errno.h>
           #include <linux/version.h>
           #include <linux/jiffies.h>
-          #include <linux/workqueue.h>
           
-          /* ===== Build-time knobs (can be mirrored in Kconfig) ===== */
+          extern char *saved_command_line; /* from init/main.c */
+          
           #define BB_ENFORCING 1
           
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY
@@ -304,42 +296,18 @@ jobs:
           #define BB_ALLOW_IN_RECOVERY 0
           #endif
           
-          #ifdef CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG
-          #define BB_PROTECT_BOOTIMG 1
-          #else
-          #define BB_PROTECT_BOOTIMG 0
-          #endif
-          
           #ifdef CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE
           #define BB_VERBOSE 1
           #else
           #define BB_VERBOSE 0
           #endif
           
-          /* Quiet by default */
-          #define bb_pr(fmt, ...)          pr_debug("baseband_guard: " fmt, ##__VA_ARGS__)
-          #define bb_pr_rl(fmt, ...)       pr_info_ratelimited("baseband_guard: " fmt, ##__VA_ARGS__)
-          
           #define BB_BYNAME_DIR "/dev/block/by-name"
           
-          extern char *saved_command_line; /* from init/main.c */
-          
-          struct name_entry { const char *name; u8 st; };
+          /* ---- protected names ---- */
           enum res_state { RS_UNKNOWN = 0, RS_OK = 1, RS_FAIL = 2 };
+          struct name_entry { const char *name; u8 st; };
           
-          action_unused static const char *slot_suffix_from_cmdline(void)
-          {
-          	const char *p = saved_command_line;
-          	if (!p) return NULL;
-          	p = strstr(p, "androidboot.slot_suffix=");
-          	if (!p) return NULL;
-          	p += strlen("androidboot.slot_suffix=");
-          	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b'))
-          		return (p[1] == 'a') ? "_a" : "_b";
-          	return NULL;
-          }
-          
-          /* === Protected partition names (customize as needed) === */
           static struct name_entry core_names[] = {
           	{ "xbl", RS_UNKNOWN }, { "xbl_config", RS_UNKNOWN }, { "uefi", RS_UNKNOWN },
           	{ "uefisecapp", RS_UNKNOWN }, { "abl", RS_UNKNOWN },
@@ -358,209 +326,229 @@ jobs:
           };
           static const size_t core_names_cnt = ARRAY_SIZE(core_names);
           
-          /* === Protected dev_t cache === */
+          /* ---- protected dev_t cache ---- */
           struct bbg_node { dev_t dev; struct hlist_node h; };
-          DEFINE_HASHTABLE(bbg_protected_devs, 7); /* 128 buckets */
-          static bool bbg_cache_built;
+          DEFINE_HASHTABLE(bbg_devs, 7); /* 128 buckets */
           
-          /* === Friendly background retry state === */
-          struct miss_entry {
-          	/* next time we may try resolving this name again */
-          	unsigned long next_retry_jiffies;
-          	/* current backoff step in jiffies */
-          	unsigned long backoff;
-          };
-          static struct miss_entry *misses; /* [core_names_cnt] */
+          static bool   cache_built;
+          static bool   need_retry;                /* true when there exists RS_FAIL */
+          static int    last_fail_cnt;
+          static unsigned long next_retry_jiffies; /* when to attempt next retry pass */
+          static unsigned long retry_interval;     /* current backoff */
+          static const unsigned long retry_min = HZ/4;   /* 250ms */
+          static const unsigned long retry_max = 5*HZ;   /* 5s */
           
-          static struct delayed_work bbg_retry_work;
-          static struct workqueue_struct *bbg_wq;
-          static unsigned int bbg_live_miss_cnt; /* how many RS_FAIL remain */
-          
-          /* Backoff parameters (soft, battery friendly) */
-          static const unsigned long BB_RETRY_BACKOFF_INIT = HZ;         /* 1s */
-          static const unsigned long BB_RETRY_BACKOFF_MAX  = 60 * HZ;    /* 60s */
-          static const unsigned long BB_RETRY_TOTAL_BUDGET = 5 * 60 * HZ;/* stop ~5min */
-          static unsigned long bbg_retry_budget; /* decremented in worker */
-          
+          /* ---- helpers ---- */
           static bool in_recovery_mode(void)
           {
           #if BB_ALLOW_IN_RECOVERY
-          	if (!saved_command_line) return false;
-          	if (strstr(saved_command_line, "androidboot.mode=recovery")) return true;
+          	if (saved_command_line && strstr(saved_command_line, "androidboot.mode=recovery"))
+          		return true;
           #endif
           	return false;
           }
           
-          static bool cache_has(dev_t dev)
+          static bool cache_has(dev_t d)
           {
           	struct bbg_node *p;
-          	hash_for_each_possible(bbg_protected_devs, p, h, (u64)dev)
-          		if (p->dev == dev) return true;
+          	hash_for_each_possible(bbg_devs, p, h, (u64)d)
+          		if (p->dev == d) return true;
           	return false;
           }
           
-          static void cache_add(dev_t dev)
+          static void cache_add(dev_t d)
           {
           	struct bbg_node *n;
-          	if (!dev || cache_has(dev)) return;
+          	if (!d || cache_has(d)) return;
           	n = kmalloc(sizeof(*n), GFP_KERNEL);
           	if (!n) return;
-          	n->dev = dev;
-          	hash_add(bbg_protected_devs, &n->h, (u64)dev);
-          	bb_pr("protect dev %u:%u\n", MAJOR(dev), MINOR(dev));
+          	n->dev = d;
+          	hash_add(bbg_devs, &n->h, (u64)d);
+          #if BB_VERBOSE
+          	pr_info("baseband_guard: protect dev %u:%u\n", MAJOR(d), MINOR(d));
+          #endif
           }
           
           static bool resolve_byname_dev(const char *name, dev_t *out)
           {
           	char *path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
-          	dev_t dev; int ret;
+          	dev_t d; int ret;
           	if (!path) return false;
-          	ret = lookup_bdev(path, &dev);
+          	ret = lookup_bdev(path, &d);
           	kfree(path);
           	if (ret) return false;
-          	*out = dev;
+          	*out = d;
           	return true;
           }
           
-          static void set_fail_with_backoff(size_t i)
+          static const char *slot_suffix_from_cmdline(void)
           {
-          	if (core_names[i].st == RS_FAIL) {
-          		/* already a fail; extend backoff up to max */
-          		misses[i].backoff = min(misses[i].backoff * 2 ?: BB_RETRY_BACKOFF_INIT, BB_RETRY_BACKOFF_MAX);
-          	} else {
-          		/* first time we realize it's a miss */
-          		misses[i].backoff = BB_RETRY_BACKOFF_INIT;
-          		bbg_live_miss_cnt++;
-          	}
-          	misses[i].next_retry_jiffies = jiffies + misses[i].backoff;
-          	core_names[i].st = RS_FAIL;
+          	const char *p = saved_command_line;
+          	if (!p) return NULL;
+          	p = strstr(p, "androidboot.slot_suffix=");
+          	if (!p) return NULL;
+          	p += strlen("androidboot.slot_suffix=");
+          	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b')) return (p[1] == 'a') ? "_a" : "_b";
+          	return NULL;
           }
           
-          static void mark_ok(size_t i)
-          {
-          	if (core_names[i].st == RS_FAIL && bbg_live_miss_cnt > 0)
-          		bbg_live_miss_cnt--;
-          	core_names[i].st = RS_OK;
-          	misses[i].backoff = 0;
-          	misses[i].next_retry_jiffies = 0;
-          }
-          
-          static void try_resolve_name(size_t i, const char *suf)
-          {
-          	dev_t dev; bool ok = false;
-          	const char *n = core_names[i].name;
-          
-          	if (resolve_byname_dev(n, &dev)) { cache_add(dev); ok = true; }
-          	if (!ok && suf) {
-          		char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
-          		if (nm) { if (resolve_byname_dev(nm, &dev)) { cache_add(dev); ok = true; } kfree(nm); }
-          	}
-          	if (!ok) {
-          		char *na = kasprintf(GFP_KERNEL, "%s_a", n);
-          		char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
-          		if (na) { if (resolve_byname_dev(na, &dev)) { cache_add(dev); ok = true; } kfree(na); }
-          		if (!ok && nb) { if (resolve_byname_dev(nb, &dev)) { cache_add(dev); ok = true; } kfree(nb); }
-          	}
-          
-          	if (ok) {
-          		mark_ok(i);
-          #if BB_VERBOSE
-          		bb_pr("[OK] %s protected\n", n);
-          #endif
-          	} else {
-          		set_fail_with_backoff(i);
-          #if BB_VERBOSE
-          		bb_pr("[MISS] %s not found\n", n);
-          #endif
-          	}
-          }
-          
+          /* ---- initial build ---- */
           static void build_cache_once(void)
           {
           	const char *suf = slot_suffix_from_cmdline();
-          	size_t i;
+          	size_t i; dev_t d; int fail = 0;
           
-          	if (READ_ONCE(bbg_cache_built))
-          		return;
+          	if (READ_ONCE(cache_built)) return;
           
-          	misses = kcalloc(core_names_cnt, sizeof(*misses), GFP_KERNEL);
-          	if (!misses)
-          		return; /* we will limp along with reverse matching only */
+          	for (i = 0; i < core_names_cnt; i++) {
+          		const char *n = core_names[i].name;
+          		bool ok = false;
           
-          	for (i = 0; i < core_names_cnt; i++)
-          		try_resolve_name(i, suf);
+          		if (resolve_byname_dev(n, &d)) { cache_add(d); ok = true; }
           
-          	WRITE_ONCE(bbg_cache_built, true);
+          		if (suf) {
+          			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
+          			if (nm) { if (resolve_byname_dev(nm, &d)) { cache_add(d); ok = true; } kfree(nm); }
+          		} else {
+          			char *na = kasprintf(GFP_KERNEL, "%s_a", n);
+          			char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
+          			if (na) { if (resolve_byname_dev(na, &d)) { cache_add(d); ok = true; } kfree(na); }
+          			if (nb) { if (resolve_byname_dev(nb, &d)) { cache_add(d); ok = true; } kfree(nb); }
+          		}
           
-          	/* schedule background retry only if there are misses and we have budget */
-          	bbg_retry_budget = BB_RETRY_TOTAL_BUDGET;
-          	if (bbg_live_miss_cnt && bbg_wq)
-          		schedule_delayed_work(&bbg_retry_work, BB_RETRY_BACKOFF_INIT);
+          		core_names[i].st = ok ? RS_OK : RS_FAIL;
+          		if (!ok) fail++;
+          #if BB_VERBOSE
+          		if (ok)  pr_info("baseband_guard: [OK]   %s\n", n);
+          		else     pr_info("baseband_guard: [MISS] %s\n", n);
+          #endif
+          	}
+          
+          	WRITE_ONCE(cache_built, true);
+          	WRITE_ONCE(need_retry, fail > 0);
+          	last_fail_cnt   = fail;
+          	retry_interval  = retry_min;
+          	next_retry_jiffies = jiffies + retry_interval;
           
           #if BB_VERBOSE
           	{
           		int cnt = 0; unsigned bkt; struct bbg_node *p;
-          		hash_for_each(bbg_protected_devs, bkt, p, h) cnt++;
-          		bb_pr("cache built, protected=%d, misses=%u\n", cnt, bbg_live_miss_cnt);
+          		hash_for_each(bbg_devs, bkt, p, h) cnt++;
+          		pr_info("baseband_guard: cache built, protected=%d, fail=%d\n", cnt, fail);
           	}
           #endif
           }
           
-          static void bbg_retry_worker(struct work_struct *ws)
+          /* ---- reverse-match current dev_t only against RS_FAIL names ---- */
+          static bool dev_reverse_match_and_protect(dev_t cur)
           {
           	const char *suf = slot_suffix_from_cmdline();
-          	unsigned long now = jiffies;
-          	size_t i; bool any_progress = false;
-          
-          	if (!misses || !bbg_retry_budget)
-          		return;
+          	size_t i; dev_t d;
           
           	for (i = 0; i < core_names_cnt; i++) {
-          		if (core_names[i].st != RS_FAIL)
-          			continue;
-          		if (time_before(now, misses[i].next_retry_jiffies))
-          			continue; /* still cooling down */
-          		try_resolve_name(i, suf);
-          		any_progress = true;
-          	}
+          		const char *n = core_names[i].name;
+          		bool hit = false;
+          		if (core_names[i].st != RS_FAIL) continue;
           
-          	if (!bbg_live_miss_cnt) {
+          		if (resolve_byname_dev(n, &d) && d == cur) hit = true;
+          
+          		if (!hit && suf) {
+          			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
+          			if (nm) { if (resolve_byname_dev(nm, &d) && d == cur) hit = true; kfree(nm); }
+          		} else if (!hit) {
+          			char *na = kasprintf(GFP_KERNEL, "%s_a", n);
+          			char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
+          			if (na) { if (resolve_byname_dev(na, &d) && d == cur) hit = true; kfree(na); }
+          			if (!hit && nb) { if (resolve_byname_dev(nb, &d) && d == cur) hit = true; kfree(nb); }
+          		}
+          
+          		if (hit) {
+          			cache_add(cur);
+          			core_names[i].st = RS_OK;
           #if BB_VERBOSE
-          		bb_pr("all names resolved; stopping retries\n");
+          			pr_info("baseband_guard: [DEV-MATCH] %s -> %u:%u\n", n, MAJOR(cur), MINOR(cur));
           #endif
-          		return; /* stop scheduling */
+          			return true; /* current write must be denied */
+          		}
           	}
-          
-          	if (bbg_retry_budget < BB_RETRY_BACKOFF_INIT) {
-          		bb_pr_rl("retry budget exhausted; giving up gracefully (misses=%u)\n", bbg_live_miss_cnt);
-          		return; /* stop scheduling */
-          	}
-          
-          	/* budget accounting: charge at most once per pass */
-          	if (any_progress)
-          		bbg_retry_budget = (bbg_retry_budget > BB_RETRY_BACKOFF_INIT) ?
-          				 bbg_retry_budget - BB_RETRY_BACKOFF_INIT : 0;
-          
-          	/* schedule next pass at the **minimum** next_retry among remaining misses */
-          	{
-          		unsigned long next = now + BB_RETRY_BACKOFF_MAX; /* upper bound */
-          		for (i = 0; i < core_names_cnt; i++)
-          			if (core_names[i].st == RS_FAIL)
-          				next = min(next, misses[i].next_retry_jiffies);
-          		/* ensure at least INIT delay and at most MAX */
-          		next = clamp(next, now + BB_RETRY_BACKOFF_INIT, now + BB_RETRY_BACKOFF_MAX);
-          		schedule_delayed_work(&bbg_retry_work, next - now);
-          	}
+          	return false;
           }
           
+          /* ---- retry pass with exponential backoff (quiet if no changes) ---- */
+          static void retry_failed_names_if_due(void)
+          {
+          	size_t i; dev_t d; int fail = 0; bool added = false;
+          	const char *suf;
+          
+          	if (!READ_ONCE(need_retry)) return;
+          	if (time_before(jiffies, READ_ONCE(next_retry_jiffies))) return;
+          
+          	suf = slot_suffix_from_cmdline();
+          
+          	for (i = 0; i < core_names_cnt; i++) {
+          		const char *n = core_names[i].name;
+          		bool ok = false;
+          		if (core_names[i].st != RS_FAIL) continue;
+          
+          		if (resolve_byname_dev(n, &d)) { cache_add(d); ok = true; }
+          		if (!ok && suf) {
+          			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
+          			if (nm) { if (resolve_byname_dev(nm, &d)) { cache_add(d); ok = true; } kfree(nm); }
+          		}
+          		if (!ok) {
+          			char *na = kasprintf(GFP_KERNEL, "%s_a", n);
+          			char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
+          			if (na) { if (resolve_byname_dev(na, &d)) { cache_add(d); ok = true; } kfree(na); }
+          			if (nb) { if (resolve_byname_dev(nb, &d)) { cache_add(d); ok = true; } kfree(nb); }
+          		}
+          
+          		if (ok) {
+          			core_names[i].st = RS_OK;
+          			added = true;
+          #if BB_VERBOSE
+          			pr_info("baseband_guard: [RETRY-OK] %s\n", n);
+          #endif
+          		}
+          	}
+          
+          	/* recompute fail */
+          	for (i = 0; i < core_names_cnt; i++)
+          		if (core_names[i].st == RS_FAIL) fail++;
+          
+          	WRITE_ONCE(need_retry, fail > 0);
+          
+          	/* backoff policy: shrink if progress, expand if not, cap at retry_max */
+          	if (!need_retry) {
+          		retry_interval = retry_max;
+          	} else if (added || fail < last_fail_cnt) {
+          		retry_interval = retry_min;
+          	} else {
+          		if (retry_interval < retry_max/2) retry_interval <<= 1;
+          		else                              retry_interval  = retry_max;
+          	}
+          
+          	last_fail_cnt = fail;
+          	WRITE_ONCE(next_retry_jiffies, jiffies + retry_interval);
+          
+          #if BB_VERBOSE
+          	if (added)
+          		pr_info("baseband_guard: retry pass done (added, next %lums)\n",
+          			(retry_interval * 1000) / HZ);
+          #endif
+          }
+          
+          /* ---- deny helper ---- */
           static int deny(const char *why)
           {
           	if (!BB_ENFORCING) return 0;
           	if (BB_ALLOW_IN_RECOVERY && in_recovery_mode()) return 0;
-          	bb_pr_rl("deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
+          #if BB_VERBOSE
+          	pr_info("baseband_guard: deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
+          #endif
           	return -EPERM;
           }
           
+          /* ---- destructive ioctl check ---- */
           static bool is_destructive_ioctl(unsigned int cmd)
           {
           	switch (cmd) {
@@ -588,69 +576,35 @@ jobs:
           	}
           }
           
-          /* Reverse dev_t match with per-name cooldown to avoid storms */
-          static bool reverse_dev_match_and_cache(dev_t cur)
-          {
-          	size_t i; dev_t d; bool hit = false; const char *suf = slot_suffix_from_cmdline();
-          	unsigned long now = jiffies;
-          
-          	for (i = 0; i < core_names_cnt; i++) {
-          		/* Skip names that recently failed to resolve (cooldown) */
-          		if (misses && core_names[i].st == RS_FAIL && time_before(now, misses[i].next_retry_jiffies))
-          			continue;
-          
-          		if (resolve_byname_dev(core_names[i].name, &d) && d == cur) {
-          			hit = true;
-          			goto out;
-          		}
-          		if (suf) {
-          			char *nm = kasprintf(GFP_ATOMIC, "%s%s", core_names[i].name, suf);
-          			if (nm) { if (resolve_byname_dev(nm, &d) && d == cur) { kfree(nm); hit = true; goto out; } kfree(nm); }
-          		} else {
-          			char *na = kasprintf(GFP_ATOMIC, "%s_a", core_names[i].name);
-          			char *nb = kasprintf(GFP_ATOMIC, "%s_b", core_names[i].name);
-          			if (na) { if (resolve_byname_dev(na, &d) && d == cur) { kfree(na); kfree(nb); hit = true; goto out; } kfree(na); }
-          			if (nb) { if (resolve_byname_dev(nb, &d) && d == cur) { kfree(nb); hit = true; goto out; } kfree(nb); }
-          		}
-          
-          		/* negative cache: if we still didn't hit, mark with backoff */
-          		if (misses && core_names[i].st != RS_OK)
-          			set_fail_with_backoff(i);
-          	}
-          
-          out:
-          	if (hit) {
-          		cache_add(cur);
-          #if BB_VERBOSE
-          		bb_pr("[DEV-MATCH] protect current dev %u:%u\n", MAJOR(cur), MINOR(cur));
-          #endif
-          	}
-          	return hit;
-          }
+          /* ---- LSM hooks ---- */
           
           static int bb_file_permission(struct file *file, int mask)
           {
           	struct inode *inode;
           
-          	if (!(mask & MAY_WRITE))
-          		return 0;
-          	if (!file)
-          		return 0;
+          	if (!(mask & MAY_WRITE)) return 0;
+          	if (!file) return 0;
           
           	inode = file_inode(file);
-          	if (!S_ISBLK(inode->i_mode))
-          		return 0;
+          	if (!S_ISBLK(inode->i_mode)) return 0;
           
-          	if (!READ_ONCE(bbg_cache_built))
+          	if (!READ_ONCE(cache_built))
           		build_cache_once();
           
-          	/* fast path: cache hit */
+          	/* fast path */
           	if (cache_has(inode->i_rdev))
           		return deny("write to protected partition");
           
-          	/* first-write safety net with cooldowned reverse match */
-          	if (reverse_dev_match_and_cache(inode->i_rdev))
+          	/* first-write hard block via reverse dev_t match against RS_FAIL names only */
+          	if (dev_reverse_match_and_protect(inode->i_rdev))
           		return deny("write to protected partition (dev match)");
+          
+          	/* scheduled retry (quiet & backoff) */
+          	retry_failed_names_if_due();
+          
+          	/* in case current got protected during retry */
+          	if (cache_has(inode->i_rdev))
+          		return deny("write to protected partition (after retry)");
           
           	return 0;
           }
@@ -659,14 +613,15 @@ jobs:
           {
           	struct inode *inode;
           
-          	if (!file)
-          		return 0;
+          	if (!file) return 0;
           	inode = file_inode(file);
-          	if (!S_ISBLK(inode->i_mode))
-          		return 0;
+          	if (!S_ISBLK(inode->i_mode)) return 0;
           
-          	if (!READ_ONCE(bbg_cache_built))
+          	if (!READ_ONCE(cache_built))
           		build_cache_once();
+          
+          	/* scheduled retry here too, but quiet */
+          	retry_failed_names_if_due();
           
           	if (cache_has(inode->i_rdev) && is_destructive_ioctl(cmd))
           		return deny("destructive ioctl on protected partition");
@@ -674,52 +629,27 @@ jobs:
           	return 0;
           }
           
-          #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
-          static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned long arg)
-          {
-          	return bb_file_ioctl(file, cmd, arg);
-          }
-          #endif
-          
-          static struct security_hook_list bb_hooks[] = {
+          static struct security_hook_list bbg_hooks[] = {
           	LSM_HOOK_INIT(file_permission, bb_file_permission),
           	LSM_HOOK_INIT(file_ioctl,      bb_file_ioctl),
-          #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
-          	LSM_HOOK_INIT(file_ioctl_compat, bb_file_ioctl_compat),
+          };
+          
+          static int __init bbg_init(void)
+          {
+          	security_add_hooks(bbg_hooks, ARRAY_SIZE(bbg_hooks), "baseband_guard");
+          #if BB_VERBOSE
+          	pr_info("baseband_guard: init (quiet backoff, dev-match first-write)\n");
           #endif
-          };
-          
-          static int __init bb_init(void)
-          {
-          	int ret = 0;
-          	bbg_wq = alloc_ordered_workqueue("bbg_wq", WQ_UNBOUND | WQ_FREEZABLE);
-          	if (!bbg_wq)
-          		return -ENOMEM;
-          	INIT_DELAYED_WORK(&bbg_retry_work, bbg_retry_worker);
-          
-          	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
-          	bb_pr("init (friendly mode: background retry with backoff; quiet logs)\n");
-          	return ret;
+          	return 0;
           }
           
-          static void __exit bb_exit(void)
-          {
-          	if (bbg_wq) {
-          		cancel_delayed_work_sync(&bbg_retry_work);
-          		destroy_workqueue(bbg_wq);
-          	}
-          }
-          
-          DEFINE_LSM(baseband_guard_friendly) = {
-          	.name = "baseband_guard_friendly",
-          	.init = bb_init,
+          DEFINE_LSM(baseband_guard) = {
+          	.name = "baseband_guard",
+          	.init = bbg_init,
           };
           
-          module_init(bb_init);
-          module_exit(bb_exit);
-          
-          MODULE_DESCRIPTION("Friendly LSM to guard baseband/bootloader partitions (low-overhead retries, ratelimited logs)");
-          MODULE_AUTHOR("秋刀鱼");
+          MODULE_DESCRIPTION("LSM: Guard baseband/bootloader partitions (quiet/backoff)");
+          MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
 
           EOF
