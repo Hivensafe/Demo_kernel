@@ -8,7 +8,9 @@
  *  - Reverse dev_t match remains active even before cache is built, to block first write.
  *  - Quiet logs (rate-limited info; verbose via Kconfig).
  *
- * This variant WHITELISTS rmt_storage & update_engine family with SILENT bypass.
+ * This variant:
+ *  - WHITELISTS rmt_storage & update_engine family with SILENT bypass.
+ *  - WHITELISTS fastbootd ONLY when booted into recovery/fastbootd mode (SILENT).
  *
  * Linux 6.6 API assumptions:
  *  - lookup_bdev(const char *path, dev_t *dev)
@@ -122,6 +124,28 @@ static inline bool is_trusted_proc(void)
 	return false;
 }
 
+/* === Mode detection & fastbootd special trust === */
+static bool in_recovery_or_fastboot_mode(void)
+{
+#if BB_ALLOW_IN_RECOVERY
+	if (!saved_command_line) return false;
+	/* recovery */
+	if (strstr(saved_command_line, "androidboot.mode=recovery")) return true;
+	/* fastbootd 标识（厂商实现可能不同，二选一或并存） */
+	if (strstr(saved_command_line, "androidboot.mode=fastboot")) return true;
+	if (strstr(saved_command_line, "androidboot.fastboot=1"))   return true;
+#endif
+	return false;
+}
+
+/* 仅在 recovery/fastbootd 模式下，fastbootd 被视为可信（静默放行） */
+static inline bool is_fastbootd_trusted(void)
+{
+	if (strcmp(current->comm, "fastbootd") != 0)
+		return false;
+	return in_recovery_or_fastboot_mode();
+}
+
 /* === Helpers === */
 static const char *slot_suffix_from_cmdline(void)
 {
@@ -132,15 +156,6 @@ static const char *slot_suffix_from_cmdline(void)
 	p += strlen("androidboot.slot_suffix=");
 	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b')) return (p[1] == 'a') ? "_a" : "_b";
 	return NULL;
-}
-
-static bool in_recovery_mode(void)
-{
-#if BB_ALLOW_IN_RECOVERY
-	if (!saved_command_line) return false;
-	if (strstr(saved_command_line, "androidboot.mode=recovery")) return true;
-#endif
-	return false;
 }
 
 static inline bool bbg_is_ready(void)
@@ -215,23 +230,7 @@ static void bbg_build_cache_once(void)
 #endif
 }
 
-static void bbg_one_shot_build_worker(struct work_struct *ws)
-{
-	bbg_build_cache_once();
-}
-
 /* === Readiness detection via mount events === */
-static void bbg_maybe_arm_build(void)
-{
-	if (bbg_ready || !bbg_wq)
-		return;
-	if (bbg_is_ready()) {
-		bbg_ready = true;
-		schedule_delayed_work(&bbg_one_shot_build, msecs_to_jiffies(bbg_post_ready_delay_ms));
-		bb_pr("armed one-shot cache build after readiness\n");
-	}
-}
-
 static int bbg_mark_mount_seen(const char *mountpoint)
 {
 	size_t i;
@@ -246,6 +245,17 @@ static int bbg_mark_mount_seen(const char *mountpoint)
 	return 0;
 }
 
+static void bbg_maybe_arm_build(void)
+{
+	if (bbg_ready || !bbg_wq)
+		return;
+	if (bbg_is_ready()) {
+		bbg_ready = true;
+		schedule_delayed_work(&bbg_one_shot_build, msecs_to_jiffies(bbg_post_ready_delay_ms));
+		bb_pr("armed one-shot cache build after readiness\n");
+	}
+}
+
 static int bbg_sb_mount(const char *dev_name, const struct path *path, const char *type,
 		unsigned long flags, void *data)
 {
@@ -257,7 +267,7 @@ static int bbg_sb_mount(const char *dev_name, const struct path *path, const cha
 	return 0; /* allow all mounts */
 }
 
-/* === Zygote pre-exec guard === */
+/* Zygote pre-exec guard */
 static int bbg_bprm_check_security(struct linux_binprm *bprm)
 {
 	size_t i; const char *path;
@@ -268,7 +278,6 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	path = bprm->filename;
 	for (i = 0; i < ARRAY_SIZE(zygote_candidates); i++) {
 		if (strcmp(path, zygote_candidates[i]) == 0) {
-			/* If logically ready but cache not built, force immediate build. */
 			if (bbg_is_ready() && !READ_ONCE(bbg_cache_built))
 				bbg_build_cache_once();
 			atomic_set(&bbg_bprm_built, 1);
@@ -278,11 +287,12 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	return 0;
 }
 
-/* === Enforcement === */
+/* === Enforcement & helpers === */
 static int deny(const char *why)
 {
 	if (!BB_ENFORCING) return 0;
-	if (BB_ALLOW_IN_RECOVERY && in_recovery_mode()) return 0;
+	/* 全局豁免：若开启 ALLOW_IN_RECOVERY，则在 recovery/fastbootd 下直接放过所有拒绝点 */
+	if (BB_ALLOW_IN_RECOVERY && in_recovery_or_fastboot_mode()) return 0;
 	bb_pr_rl("deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
 	return -EPERM;
 }
@@ -314,7 +324,9 @@ static bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
-/* Reverse dev_t match as a safety net even before cache is built; no retries */
+/* slot suffix helper */
+static const char *slot_suffix_from_cmdline(void);
+
 static bool reverse_dev_match_and_cache(dev_t cur)
 {
 	size_t i; dev_t d; bool hit = false; const char *suf = slot_suffix_from_cmdline();
@@ -345,7 +357,11 @@ static int bb_file_permission(struct file *file, int mask)
 	if (!file)
 		return 0;
 
-	/* ===== Full bypass for trusted processes (silent) ===== */
+	/* fastbootd 在 recovery/fastbootd 模式：完全静默放行 */
+	if (is_fastbootd_trusted())
+		return 0;
+
+	/* 静默白名单：rmt_storage / update_engine* */
 	if (is_trusted_proc())
 		return 0;
 
@@ -356,7 +372,7 @@ static int bb_file_permission(struct file *file, int mask)
 	if (cache_has(inode->i_rdev))
 		return deny("write to protected partition");
 
-	/* Safety: even before cache build, try one-shot reverse match for this dev */
+	/* 首写安全网：未建完缓存前的反向匹配 */
 	if (reverse_dev_match_and_cache(inode->i_rdev))
 		return deny("write to protected partition (dev match)");
 
@@ -370,7 +386,11 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!file)
 		return 0;
 
-	/* ===== Full bypass for trusted processes (including destructive ioctls) — silent ===== */
+	/* fastbootd 在 recovery/fastbootd 模式：完全静默放行（含破坏性 ioctl） */
+	if (is_fastbootd_trusted())
+		return 0;
+
+	/* 静默白名单：rmt_storage / update_engine* */
 	if (is_trusted_proc())
 		return 0;
 
@@ -391,6 +411,11 @@ static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned lo
 }
 #endif
 
+static void bbg_one_shot_build_worker(struct work_struct *ws)
+{
+	bbg_build_cache_once();
+}
+
 static struct security_hook_list bb_hooks[] = {
 	LSM_HOOK_INIT(file_permission, bb_file_permission),
 	LSM_HOOK_INIT(file_ioctl,      bb_file_ioctl),
@@ -408,7 +433,7 @@ static int __init bbg_init(void)
 	if (!bbg_wq)
 		return -ENOMEM;
 	INIT_DELAYED_WORK(&bbg_one_shot_build, bbg_one_shot_build_worker);
-	bb_pr("init (auto-gated one-shot cache; no retry; pre-app zygote guard; trusted-proc silent bypass)\n");
+	bb_pr("init (auto-gated one-shot cache; no retry; pre-app zygote guard; trusted-proc & fastbootd silent bypass)\n");
 	return 0;
 }
 
@@ -428,6 +453,6 @@ DEFINE_LSM(baseband_guard) = {
 module_init(bbg_init);
 module_exit(bbg_exit);
 
-MODULE_DESCRIPTION("Auto-gated no-retry LSM: one-shot cache after core mounts, forced before Zygote exec, with trusted-proc SILENT bypass");
-MODULE_AUTHOR("秋刀鱼");
+MODULE_DESCRIPTION("Auto-gated no-retry LSM: one-shot cache after core mounts, forced before Zygote exec, with trusted-proc & fastbootd SILENT bypass");
+MODULE_AUTHOR("秋刀鱼 + ChatGPT");
 MODULE_LICENSE("GPL v2");
