@@ -1,22 +1,29 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * baseband_guard: LSM to deny actual writes to critical baseband/bootloader partitions
- * - Deny at write-time (file_permission with MAY_WRITE), NOT at open-time
- * - No timers, no directory walks, no <linux/genhd.h>
- * - On-demand initial build via lookup_bdev(path, &dev_t)
- * - Late /dev/block/by-name nodes handled by throttled retries on cache miss
- * - Verbose logs per name: [OK]/[MISS] at initial build; [RETRY-OK] on later success
- * - First write also denied via DEV-MATCH fallback: reverse match current inode->i_rdev
+ * baseband_guard_autogate: LSM to deny writes to critical baseband/bootloader partitions
+ *
+ * One-button behavior:
+ *  - Zero retries/loops. Build dev_t cache EXACTLY ONCE when the device is logically ready
+ *    (core Android mounts observed) and strictly before any apps can run (zygote pre-exec).
+ *  - Reverse dev_t match remains active even before cache is built, to block first write.
+ *  - Quiet logs (rate-limited info; verbose via Kconfig).
+ *
+ * This variant additionally WHITELISTS certain processes (rmt_storage/update_engine)
+ * to BYPASS ALL CHECKS (writes + ioctls), as requested.
+ *
+ * Linux 6.6 API assumptions:
+ *  - lookup_bdev(const char *path, dev_t *dev)
+ *  - LSM hooks: file_permission, file_ioctl, file_ioctl_compat(>=6.6), sb_mount, bprm_check_security
  */
 
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/security.h>
 #include <linux/lsm_hooks.h>
-#include <linux/fs.h>        /* MAY_* */
-#include <linux/dcache.h>
+#include <linux/fs.h>
+#include <linux/binfmts.h>
 #include <linux/namei.h>
-#include <linux/blkdev.h>    /* lookup_bdev */
+#include <linux/blkdev.h>
 #include <linux/blk_types.h>
 #include <linux/slab.h>
 #include <linux/hashtable.h>
@@ -24,8 +31,9 @@
 #include <linux/errno.h>
 #include <linux/version.h>
 #include <linux/jiffies.h>
-
-extern char *saved_command_line; /* from init/main.c */
+#include <linux/workqueue.h>
+#include <linux/atomic.h>
+#include <linux/param.h>
 
 #define BB_ENFORCING 1
 
@@ -35,356 +43,401 @@ extern char *saved_command_line; /* from init/main.c */
 #define BB_ALLOW_IN_RECOVERY 0
 #endif
 
-#ifdef CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG
-#define BB_PROTECT_BOOTIMG 1
-#else
-#define BB_PROTECT_BOOTIMG 0
-#endif
-
 #ifdef CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE
 #define BB_VERBOSE 1
 #else
 #define BB_VERBOSE 0
 #endif
 
+#define bb_pr(fmt, ...)    pr_debug("baseband_guard: " fmt, ##__VA_ARGS__)
+#define bb_pr_rl(fmt, ...) pr_info_ratelimited("baseband_guard: " fmt, ##__VA_ARGS__)
+
 #define BB_BYNAME_DIR "/dev/block/by-name"
 
-/* ======== 受保护分区清单 ======== */
+extern char *saved_command_line; /* from init/main.c */
+
 struct name_entry { const char *name; u8 st; };
 enum res_state { RS_UNKNOWN = 0, RS_OK = 1, RS_FAIL = 2 };
 
+/* === Protected partition names (customize as needed) === */
 static struct name_entry core_names[] = {
-  { "xbl", RS_UNKNOWN }, { "xbl_config", RS_UNKNOWN }, { "uefi", RS_UNKNOWN },
-  { "uefisecapp", RS_UNKNOWN }, { "abl", RS_UNKNOWN },
-  { "modem", RS_UNKNOWN }, { "modemst1", RS_UNKNOWN }, { "modemst2", RS_UNKNOWN },
-  { "fsg", RS_UNKNOWN }, { "fsc", RS_UNKNOWN }, { "connsec", RS_UNKNOWN },
-  { "mdm1oemnvbktmp", RS_UNKNOWN }, { "oplusdycnvbk", RS_UNKNOWN }, { "oplusstanvbk", RS_UNKNOWN },
-  { "nvram", RS_UNKNOWN }, { "nvdata", RS_UNKNOWN }, { "nvcfg", RS_UNKNOWN },
-  { "md_sec", RS_UNKNOWN }, { "sec1", RS_UNKNOWN }, { "seccfg", RS_UNKNOWN },
-  { "vbmeta", RS_UNKNOWN }, { "vbmeta_system", RS_UNKNOWN }, { "vbmeta_vendor", RS_UNKNOWN },
-  { "tz", RS_UNKNOWN }, { "hyp", RS_UNKNOWN }, { "keymaster", RS_UNKNOWN }, { "keystore", RS_UNKNOWN },
-  { "storsec", RS_UNKNOWN }, { "secdata", RS_UNKNOWN }, { "ssd", RS_UNKNOWN },
-  { "pvmfw", RS_UNKNOWN }, { "vm-bootsys", RS_UNKNOWN }, { "vm-persist", RS_UNKNOWN },
-  { "imagefv", RS_UNKNOWN }, { "toolsfv", RS_UNKNOWN }, { "tee", RS_UNKNOWN }, { "rotfw", RS_UNKNOWN },
-  { "frp", RS_UNKNOWN }, { "preloader_raw", RS_UNKNOWN }, { "lk", RS_UNKNOWN },
-  { "bootloader1", RS_UNKNOWN }, { "bootloader2", RS_UNKNOWN }, { "ocdt", RS_UNKNOWN },
+	{ "xbl", RS_UNKNOWN }, { "xbl_config", RS_UNKNOWN }, { "uefi", RS_UNKNOWN },
+	{ "uefisecapp", RS_UNKNOWN }, { "abl", RS_UNKNOWN },
+	{ "modem", RS_UNKNOWN }, { "modemst1", RS_UNKNOWN }, { "modemst2", RS_UNKNOWN },
+	{ "fsg", RS_UNKNOWN }, { "fsc", RS_UNKNOWN }, { "connsec", RS_UNKNOWN },
+	{ "mdm1oemnvbktmp", RS_UNKNOWN }, { "oplusdycnvbk", RS_UNKNOWN }, { "oplusstanvbk", RS_UNKNOWN },
+	{ "nvram", RS_UNKNOWN }, { "nvdata", RS_UNKNOWN }, { "nvcfg", RS_UNKNOWN },
+	{ "md_sec", RS_UNKNOWN }, { "sec1", RS_UNKNOWN }, { "seccfg", RS_UNKNOWN },
+	{ "vbmeta", RS_UNKNOWN }, { "vbmeta_system", RS_UNKNOWN }, { "vbmeta_vendor", RS_UNKNOWN },
+	{ "tz", RS_UNKNOWN }, { "hyp", RS_UNKNOWN }, { "keymaster", RS_UNKNOWN }, { "keystore", RS_UNKNOWN },
+	{ "storsec", RS_UNKNOWN }, { "secdata", RS_UNKNOWN }, { "ssd", RS_UNKNOWN },
+	{ "pvmfw", RS_UNKNOWN }, { "vm-bootsys", RS_UNKNOWN }, { "vm-persist", RS_UNKNOWN },
+	{ "imagefv", RS_UNKNOWN }, { "toolsfv", RS_UNKNOWN }, { "tee", RS_UNKNOWN }, { "rotfw", RS_UNKNOWN },
+	{ "frp", RS_UNKNOWN }, { "preloader_raw", RS_UNKNOWN }, { "lk", RS_UNKNOWN },
+	{ "bootloader1", RS_UNKNOWN }, { "bootloader2", RS_UNKNOWN }, { "ocdt", RS_UNKNOWN },
 };
 static const size_t core_names_cnt = ARRAY_SIZE(core_names);
 
-/* ======== 受保护 dev_t 缓存 ======== */
+/* === Protected dev_t cache === */
 struct bbg_node { dev_t dev; struct hlist_node h; };
 DEFINE_HASHTABLE(bbg_protected_devs, 7); /* 128 buckets */
-static bool bbg_cache_built;             /* 首次构建完成标志 */
+static bool bbg_cache_built;
 
-/* 按需重试的软节流（无定时器） */
-static unsigned long bbg_retry_jiffies;                  /* 上次重试时间 */
-static const unsigned long bbg_retry_min_interval = HZ/5;/* 约 200ms */
+/* === Readiness gating (observe mounts, then build once; also gate on zygote pre-exec) === */
+static const char * const ready_mounts[] = { "/system", "/vendor", "/product", "/odm", "/data" };
+#define READY_MOUNT_CNT (ARRAY_SIZE(ready_mounts))
+static atomic_long_t ready_seen_mask = ATOMIC_LONG_INIT(0); /* bit i set when path seen */
+static bool bbg_ready; /* latched */
 
-/* ======== 帮助函数 ======== */
+/* Zygote pre-exec guard */
+static atomic_t bbg_bprm_built = ATOMIC_INIT(0);
+static const char *zygote_candidates[] = {
+	"/system/bin/app_process64",
+	"/system/bin/app_process32",
+	"/apex/com.android.art/bin/app_process64",
+	"/apex/com.android.art/bin/app_process32",
+};
+#define ZYGOTE_CAND_CNT (ARRAY_SIZE(zygote_candidates))
+
+/* Optional: tiny post-ready delay to allow by-name symlinks to settle */
+static struct delayed_work bbg_one_shot_build;
+static struct workqueue_struct *bbg_wq;
+static unsigned int bbg_post_ready_delay_ms = 1200; /* 1.2s */
+module_param_named(post_ready_delay_ms, bbg_post_ready_delay_ms, uint, 0644);
+MODULE_PARM_DESC(post_ready_delay_ms, "Delay (ms) after readiness before building cache");
+
+/* === Trusted process allowlist (full bypass) === */
+static const char * const trusted_procs[] = {
+	"rmt_storage",
+	"update_engine",
+	"update_engine_sideload",
+	"updata_engien", /* 兼容你的写法 */
+};
+static inline bool is_trusted_proc(void)
+{
+	size_t i;
+	for (i = 0; i < ARRAY_SIZE(trusted_procs); i++) {
+		if (strcmp(current->comm, trusted_procs[i]) == 0)
+			return true;
+	}
+	return false;
+}
+
+/* === Helpers === */
+static const char *slot_suffix_from_cmdline(void)
+{
+	const char *p = saved_command_line;
+	if (!p) return NULL;
+	p = strstr(p, "androidboot.slot_suffix=");
+	if (!p) return NULL;
+	p += strlen("androidboot.slot_suffix=");
+	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b')) return (p[1] == 'a') ? "_a" : "_b";
+	return NULL;
+}
+
 static bool in_recovery_mode(void)
 {
 #if BB_ALLOW_IN_RECOVERY
-  if (!saved_command_line) return false;
-  if (strstr(saved_command_line, "androidboot.mode=recovery")) return true;
+	if (!saved_command_line) return false;
+	if (strstr(saved_command_line, "androidboot.mode=recovery")) return true;
 #endif
-  return false;
+	return false;
+}
+
+static inline bool bbg_is_ready(void)
+{
+	unsigned long mask = atomic_long_read(&ready_seen_mask);
+	unsigned long full = (READY_MOUNT_CNT >= BITS_PER_LONG) ? ~0UL : ((1UL << READY_MOUNT_CNT) - 1);
+	return bbg_ready || ((mask & full) == full);
 }
 
 static bool cache_has(dev_t dev)
 {
-  struct bbg_node *p;
-  hash_for_each_possible(bbg_protected_devs, p, h, (u64)dev)
-    if (p->dev == dev) return true;
-  return false;
+	struct bbg_node *p;
+	hash_for_each_possible(bbg_protected_devs, p, h, (u64)dev)
+		if (p->dev == dev) return true;
+	return false;
 }
 
 static void cache_add(dev_t dev)
 {
-  struct bbg_node *n;
-  if (!dev || cache_has(dev)) return;
-  n = kmalloc(sizeof(*n), GFP_KERNEL);
-  if (!n) return;
-  n->dev = dev;
-  hash_add(bbg_protected_devs, &n->h, (u64)dev);
+	struct bbg_node *n;
+	if (!dev || cache_has(dev)) return;
+	n = kmalloc(sizeof(*n), GFP_KERNEL);
+	if (!n) return;
+	n->dev = dev;
+	hash_add(bbg_protected_devs, &n->h, (u64)dev);
 #if BB_VERBOSE
-  pr_info("baseband_guard: protect dev %u:%u\n", MAJOR(dev), MINOR(dev));
+	bb_pr("protect dev %u:%u\n", MAJOR(dev), MINOR(dev));
 #endif
 }
 
-/* 6.6: lookup_bdev(path, &dev_t) */
 static bool resolve_byname_dev(const char *name, dev_t *out)
 {
-  char *path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
-  dev_t dev; int ret;
-  if (!path) return false;
-  ret = lookup_bdev(path, &dev);
-  kfree(path);
-  if (ret) return false;
-  *out = dev;
-  return true;
+	char *path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
+	dev_t dev; int ret;
+	if (!path) return false;
+	ret = lookup_bdev(path, &dev);
+	kfree(path);
+	if (ret) return false;
+	*out = dev;
+	return true;
 }
 
-static const char *slot_suffix_from_cmdline(void)
+/* === One-shot cache build === */
+static void bbg_build_cache_once(void)
 {
-  const char *p = saved_command_line;
-  if (!p) return NULL;
-  p = strstr(p, "androidboot.slot_suffix=");
-  if (!p) return NULL;
-  p += strlen("androidboot.slot_suffix=");
-  if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b')) return (p[1] == 'a') ? "_a" : "_b";
-  return NULL;
+	const char *suf = slot_suffix_from_cmdline();
+	size_t i; dev_t dev; bool any = false;
+
+	if (READ_ONCE(bbg_cache_built))
+		return;
+
+	for (i = 0; i < core_names_cnt; i++) {
+		const char *n = core_names[i].name; bool ok = false;
+		if (resolve_byname_dev(n, &dev)) { cache_add(dev); ok = true; }
+		if (!ok && suf) {
+			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
+			if (nm) { if (resolve_byname_dev(nm, &dev)) { cache_add(dev); ok = true; } kfree(nm); }
+		}
+		if (!ok) {
+			char *na = kasprintf(GFP_KERNEL, "%s_a", n);
+			char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
+			if (na) { if (resolve_byname_dev(na, &dev)) { cache_add(dev); ok = true; } kfree(na); }
+			if (!ok && nb) { if (resolve_byname_dev(nb, &dev)) { cache_add(dev); ok = true; } kfree(nb); }
+		}
+		core_names[i].st = ok ? RS_OK : RS_FAIL;
+		any |= ok;
+	}
+
+	WRITE_ONCE(bbg_cache_built, true);
+#if BB_VERBOSE
+	bb_pr("one-shot cache built (any=%d)\n", any);
+#endif
 }
 
-/* 初次构建：解析清单；失败项记为 RS_FAIL（打印 [MISS]），成功打印 [OK] */
-static void build_cache_once(void)
+static void bbg_one_shot_build_worker(struct work_struct *ws)
 {
-  const char *suf = slot_suffix_from_cmdline(); /* "_a"/"_b"/NULL */
-  size_t i; dev_t dev;
-
-  if (READ_ONCE(bbg_cache_built))
-    return;
-
-  for (i = 0; i < core_names_cnt; i++) {
-    const char *n = core_names[i].name;
-    bool ok = false;
-
-    /* 基本名 */
-    if (resolve_byname_dev(n, &dev)) { cache_add(dev); ok = true; }
-
-    /* A/B 后缀 */
-    if (suf) {
-      char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
-      if (nm) { if (resolve_byname_dev(nm, &dev)) { cache_add(dev); ok = true; } kfree(nm); }
-    } else {
-      char *na = kasprintf(GFP_KERNEL, "%s_a", n);
-      char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
-      if (na) { if (resolve_byname_dev(na, &dev)) { cache_add(dev); ok = true; } kfree(na); }
-      if (nb) { if (resolve_byname_dev(nb, &dev)) { cache_add(dev); ok = true; } kfree(nb); }
-    }
-
-    core_names[i].st = ok ? RS_OK : RS_FAIL;
-
-#if BB_VERBOSE
-    if (ok)
-      pr_info("baseband_guard: [OK]   %s protected\n", n);
-    else
-      pr_info("baseband_guard: [MISS] %s not found (RS_FAIL)\n", n);
-#endif
-  }
-
-  WRITE_ONCE(bbg_cache_built, true);
-
-#if BB_VERBOSE
-  {
-    int cnt = 0; unsigned bkt; struct bbg_node *p;
-    hash_for_each(bbg_protected_devs, bkt, p, h) cnt++;
-    pr_info("baseband_guard: cache built, protected=%d\n", cnt);
-  }
-#endif
+	bbg_build_cache_once();
 }
 
-/* 对 RS_FAIL 的名字做一轮重试；基于 jiffies 的最小间隔（无定时器） */
-static void retry_resolve_failed_names_throttled(void)
+/* === Readiness detection via mount events === */
+static void bbg_maybe_arm_build(void)
 {
-  const char *suf = slot_suffix_from_cmdline();
-  size_t i; dev_t dev; bool any = false;
-
-  if (time_before(jiffies, READ_ONCE(bbg_retry_jiffies) + bbg_retry_min_interval))
-    return;
-
-  for (i = 0; i < core_names_cnt; i++) {
-    if (core_names[i].st != RS_FAIL) continue;
-    {
-      const char *n = core_names[i].name;
-      bool ok = false;
-
-      if (resolve_byname_dev(n, &dev)) { cache_add(dev); ok = true; }
-
-      if (!ok && suf) {
-        char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
-        if (nm) { if (resolve_byname_dev(nm, &dev)) { cache_add(dev); ok = true; } kfree(nm); }
-      }
-      if (!ok) {
-        char *na = kasprintf(GFP_KERNEL, "%s_a", n);
-        char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
-        if (na) { if (resolve_byname_dev(na, &dev)) { cache_add(dev); ok = true; } kfree(na); }
-        if (nb) { if (resolve_byname_dev(nb, &dev)) { cache_add(dev); ok = true; } kfree(nb); }
-      }
-
-      if (ok) {
-        core_names[i].st = RS_OK; any = true;
-#if BB_VERBOSE
-        pr_info("baseband_guard: [RETRY-OK] %s protected\n", n);
-#endif
-      }
-    }
-  }
-
-  WRITE_ONCE(bbg_retry_jiffies, jiffies);
-#if BB_VERBOSE
-  pr_info("baseband_guard: retry pass done%s\n", any ? " (some added)" : "");
-#endif
+	if (bbg_ready || !bbg_wq)
+		return;
+	if (bbg_is_ready()) {
+		bbg_ready = true;
+		schedule_delayed_work(&bbg_one_shot_build, msecs_to_jiffies(bbg_post_ready_delay_ms));
+		bb_pr("armed one-shot cache build after readiness\n");
+	}
 }
 
+static int bbg_mark_mount_seen(const char *mountpoint)
+{
+	size_t i;
+	if (!mountpoint)
+		return 0;
+	for (i = 0; i < READY_MOUNT_CNT; i++) {
+		if (strcmp(mountpoint, ready_mounts[i]) == 0) {
+			atomic_long_or(1UL << i, &ready_seen_mask);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int bbg_sb_mount(const char *dev_name, const struct path *path, const char *type,
+		unsigned long flags, void *data)
+{
+	const char *mp = NULL;
+	if (path && path->dentry)
+		mp = path->dentry->d_name.name;
+	if (bbg_mark_mount_seen(mp))
+		bbg_maybe_arm_build();
+	return 0; /* allow all mounts */
+}
+
+/* === Zygote pre-exec guard === */
+static int bbg_bprm_check_security(struct linux_binprm *bprm)
+{
+	size_t i; const char *path;
+	if (!bprm || !bprm->filename)
+		return 0;
+	if (atomic_read(&bbg_bprm_built))
+		return 0;
+	path = bprm->filename;
+	for (i = 0; i < ARRAY_SIZE(zygote_candidates); i++) {
+		if (strcmp(path, zygote_candidates[i]) == 0) {
+			/* If logically ready but cache not built, force immediate build. */
+			if (bbg_is_ready() && !READ_ONCE(bbg_cache_built))
+				bbg_build_cache_once();
+			atomic_set(&bbg_bprm_built, 1);
+			break;
+		}
+	}
+	return 0;
+}
+
+/* === Enforcement === */
 static int deny(const char *why)
 {
-  if (!BB_ENFORCING) return 0;
-  if (BB_ALLOW_IN_RECOVERY && in_recovery_mode()) return 0;
-#if BB_VERBOSE
-  pr_info("baseband_guard: deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
-#endif
-  return -EPERM;
+	if (!BB_ENFORCING) return 0;
+	if (BB_ALLOW_IN_RECOVERY && in_recovery_mode()) return 0;
+	bb_pr_rl("deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
+	return -EPERM;
 }
 
-/* 破坏性 ioctl：仅用于受保护分区 */
 static bool is_destructive_ioctl(unsigned int cmd)
 {
-  switch (cmd) {
-  case BLKDISCARD:
-  case BLKSECDISCARD:
-  case BLKZEROOUT:
+	switch (cmd) {
+	case BLKDISCARD:
+	case BLKSECDISCARD:
+	case BLKZEROOUT:
 #ifdef BLKPG
-  case BLKPG:
+	case BLKPG:
 #endif
 #ifdef BLKTRIM
-  case BLKTRIM:
+	case BLKTRIM:
 #endif
 #ifdef BLKRRPART
-  case BLKRRPART:
+	case BLKRRPART:
 #endif
 #ifdef BLKSETRO
-  case BLKSETRO:
+	case BLKSETRO:
 #endif
 #ifdef BLKSETBADSECTORS
-  case BLKSETBADSECTORS:
+	case BLKSETBADSECTORS:
 #endif
-    return true;
-  default:
-    return false;
-  }
+		return true;
+	default:
+		return false;
+	}
 }
 
-/* ========= LSM Hooks =========
- * 只在写路径拒绝：避免 O_RDWR 只读访问受影响（例如调制解调器初始化）
- */
+/* Reverse dev_t match as a safety net even before cache is built; no retries */
+static bool reverse_dev_match_and_cache(dev_t cur)
+{
+	size_t i; dev_t d; bool hit = false; const char *suf = slot_suffix_from_cmdline();
+
+	for (i = 0; i < core_names_cnt; i++) {
+		if (resolve_byname_dev(core_names[i].name, &d) && d == cur) { hit = true; break; }
+		if (suf) {
+			char *nm = kasprintf(GFP_ATOMIC, "%s%s", core_names[i].name, suf);
+			if (nm) { if (resolve_byname_dev(nm, &d) && d == cur) { kfree(nm); hit = true; break; } kfree(nm); }
+		} else {
+			char *na = kasprintf(GFP_ATOMIC, "%s_a", core_names[i].name);
+			char *nb = kasprintf(GFP_ATOMIC, "%s_b", core_names[i].name);
+			if (na) { if (resolve_byname_dev(na, &d) && d == cur) { kfree(na); kfree(nb); hit = true; break; } kfree(na); }
+			if (nb) { if (resolve_byname_dev(nb, &d) && d == cur) { kfree(nb); hit = true; break; } kfree(nb); }
+		}
+	}
+	if (hit)
+		cache_add(cur);
+	return hit;
+}
+
 static int bb_file_permission(struct file *file, int mask)
 {
-  struct inode *inode;
-  size_t i;
+	struct inode *inode;
 
-  if (!(mask & MAY_WRITE))    /* 只拦真正的写操作 */
-    return 0;
-  if (!file)
-    return 0;
+	if (!(mask & MAY_WRITE))
+		return 0;
+	if (!file)
+		return 0;
 
-  inode = file_inode(file);
-  if (!S_ISBLK(inode->i_mode))
-    return 0;
-
-  /* 首次需要时构建缓存 */
-  if (!READ_ONCE(bbg_cache_built))
-    build_cache_once();
-
-  /* 命中：拒绝 */
-  if (cache_has(inode->i_rdev))
-    return deny("write to protected partition");
-
-  /* ===== A) DEV-MATCH 兜底：首写也能挡 =====
-   * 反向用当前 inode->i_rdev 去匹配 core_names[]（含 _a/_b 变体）的实际 dev_t。
-   * 命中则当场加入缓存并拒绝本次写。
-   */
-  {
-    const char *suf = slot_suffix_from_cmdline();
-    dev_t d;
-    for (i = 0; i < core_names_cnt; i++) {
-      const char *n = core_names[i].name;
-      bool hit = false;
-
-      if (resolve_byname_dev(n, &d) && d == inode->i_rdev) hit = true;
-      if (!hit && suf) {
-        char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
-        if (nm) { if (resolve_byname_dev(nm, &d) && d == inode->i_rdev) hit = true; kfree(nm); }
-      } else if (!hit) {
-        char *na = kasprintf(GFP_KERNEL, "%s_a", n);
-        char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
-        if (na) { if (resolve_byname_dev(na, &d) && d == inode->i_rdev) hit = true; kfree(na); }
-        if (!hit && nb) { if (resolve_byname_dev(nb, &d) && d == inode->i_rdev) hit = true; kfree(nb); }
-      }
-
-      if (hit) {
-        cache_add(inode->i_rdev);
+	/* ===== Full bypass for trusted processes ===== */
+	if (is_trusted_proc()) {
 #if BB_VERBOSE
-        pr_info("baseband_guard: [DEV-MATCH] protect current dev %u:%u as %s\n",
-                MAJOR(inode->i_rdev), MINOR(inode->i_rdev), n);
+		bb_pr_rl("allow (trusted proc) pid=%d comm=%s\n", current->pid, current->comm);
 #endif
-        return deny("write to protected partition (dev match)");
-      }
-    }
-  }
+		return 0;
+	}
 
-  /* B) 未命中：按需重试（处理 by-name 迟到） */
-  if (READ_ONCE(bbg_cache_built))
-    retry_resolve_failed_names_throttled();
+	inode = file_inode(file);
+	if (!S_ISBLK(inode->i_mode))
+		return 0;
 
-  /* 重试后再判一次 */
-  if (cache_has(inode->i_rdev))
-    return deny("write to protected partition (after retry)");
+	if (cache_has(inode->i_rdev))
+		return deny("write to protected partition");
 
-  return 0;
+	/* Safety: even before cache build, try one-shot reverse match for this dev */
+	if (reverse_dev_match_and_cache(inode->i_rdev))
+		return deny("write to protected partition (dev match)");
+
+	return 0;
 }
 
 static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-  struct inode *inode;
+	struct inode *inode;
 
-  if (!file)
-    return 0;
-  inode = file_inode(file);
-  if (!S_ISBLK(inode->i_mode))
-    return 0;
+	if (!file)
+		return 0;
 
-  /* 构建/补全缓存（当首次命中 ioctl 的是延迟节点时也能覆盖到） */
-  if (!READ_ONCE(bbg_cache_built))
-    build_cache_once();
-  else
-    retry_resolve_failed_names_throttled();
+	/* ===== Full bypass for trusted processes (including destructive ioctls) ===== */
+	if (is_trusted_proc()) {
+#if BB_VERBOSE
+		bb_pr_rl("allow ioctl (trusted proc) pid=%d comm=%s cmd=0x%x\n",
+		         current->pid, current->comm, cmd);
+#endif
+		return 0;
+	}
 
-  /* 仅在受保护分区上拦破坏性 ioctl */
-  if (cache_has(inode->i_rdev) && is_destructive_ioctl(cmd))
-    return deny("destructive ioctl on protected partition");
+	inode = file_inode(file);
+	if (!S_ISBLK(inode->i_mode))
+		return 0;
 
-  return 0;
+	if (cache_has(inode->i_rdev) && is_destructive_ioctl(cmd))
+		return deny("destructive ioctl on protected partition");
+
+	return 0;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
 static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned long arg)
 {
-  return bb_file_ioctl(file, cmd, arg);
+	return bb_file_ioctl(file, cmd, arg);
 }
 #endif
 
 static struct security_hook_list bb_hooks[] = {
-  LSM_HOOK_INIT(file_permission, bb_file_permission),
-  LSM_HOOK_INIT(file_ioctl,      bb_file_ioctl),
+	LSM_HOOK_INIT(file_permission, bb_file_permission),
+	LSM_HOOK_INIT(file_ioctl,      bb_file_ioctl),
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
-  LSM_HOOK_INIT(file_ioctl_compat, bb_file_ioctl_compat),
+	LSM_HOOK_INIT(file_ioctl_compat, bb_file_ioctl_compat),
 #endif
+	LSM_HOOK_INIT(sb_mount,        bbg_sb_mount),
+	LSM_HOOK_INIT(bprm_check_security, bbg_bprm_check_security),
 };
 
-static int __init bb_init(void)
+static int __init bbg_init(void)
 {
-  security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
-#if BB_VERBOSE
-  pr_info("baseband_guard: init (write-time only; throttled retry on miss + DEV-MATCH fallback)\n");
-#endif
-  return 0;
+	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
+	bbg_wq = alloc_ordered_workqueue("bbg_wq", WQ_UNBOUND | WQ_FREEZABLE);
+	if (!bbg_wq)
+		return -ENOMEM;
+	INIT_DELAYED_WORK(&bbg_one_shot_build, bbg_one_shot_build_worker);
+	bb_pr("init (auto-gated one-shot cache; no retry; pre-app zygote guard; trusted proc bypass)\n");
+	return 0;
+}
+
+static void __exit bbg_exit(void)
+{
+	if (bbg_wq) {
+		cancel_delayed_work_sync(&bbg_one_shot_build);
+		destroy_workqueue(bbg_wq);
+	}
 }
 
 DEFINE_LSM(baseband_guard) = {
-  .name = "baseband_guard",
-  .init = bb_init,
+	.name = "baseband_guard",
+	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("LSM to guard baseband/bootloader partitions (deny at write-time; on-demand build + throttled retry + dev match fallback)");
+module_init(bbg_init);
+module_exit(bbg_exit);
+
+MODULE_DESCRIPTION("Auto-gated no-retry LSM: one-shot cache after core mounts, forced before Zygote exec, with trusted-proc full bypass");
 MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
