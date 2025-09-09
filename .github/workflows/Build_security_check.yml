@@ -263,7 +263,7 @@ jobs:
           # mv init/main.c.patched init/main.c
           # echo "已自动插入 serialid_check.c 到 main.c"
 
-          cp "${GITHUB_WORKSPACE}/BACKUP/baseband_guard.c" ./baseband_guard.c
+          cp "${GITHUB_WORKSPACE}/BACKUP/baseband_guard.c" ./security/baseband_guard.c
           set -euo pipefail
           # 0) 位置自检
           test -f security/Kconfig || { echo "[ERR] 请在 kernel_workspace/kernel_platform/common 目录执行（找不到 security/Kconfig）"; exit 1; }
