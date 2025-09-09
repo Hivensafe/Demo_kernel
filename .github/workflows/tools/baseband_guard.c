@@ -8,6 +8,8 @@
  *  - Reverse dev_t match remains active even before cache is built, to block first write.
  *  - Quiet logs (rate-limited info; verbose via Kconfig).
  *
+ * This variant WHITELISTS rmt_storage & update_engine family with SILENT bypass.
+ *
  * Linux 6.6 API assumptions:
  *  - lookup_bdev(const char *path, dev_t *dev)
  *  - LSM hooks: file_permission, file_ioctl, file_ioctl_compat(>=6.6), sb_mount, bprm_check_security
@@ -32,7 +34,6 @@
 #include <linux/atomic.h>
 #include <linux/param.h>
 
-/* ===== Build-time knobs ===== */
 #define BB_ENFORCING 1
 
 #ifdef CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY
@@ -103,6 +104,23 @@ static struct workqueue_struct *bbg_wq;
 static unsigned int bbg_post_ready_delay_ms = 1200; /* 1.2s */
 module_param_named(post_ready_delay_ms, bbg_post_ready_delay_ms, uint, 0644);
 MODULE_PARM_DESC(post_ready_delay_ms, "Delay (ms) after readiness before building cache");
+
+/* === Trusted process allowlist (full bypass; SILENT) === */
+static const char * const trusted_procs[] = {
+	"rmt_storage",
+	"update_engine",
+	"update_engine_sideload",
+	"updata_engien", /* 兼容笔误 */
+};
+static inline bool is_trusted_proc(void)
+{
+	size_t i;
+	for (i = 0; i < ARRAY_SIZE(trusted_procs); i++) {
+		if (strcmp(current->comm, trusted_procs[i]) == 0)
+			return true;
+	}
+	return false;
+}
 
 /* === Helpers === */
 static const char *slot_suffix_from_cmdline(void)
@@ -248,7 +266,7 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	if (atomic_read(&bbg_bprm_built))
 		return 0;
 	path = bprm->filename;
-	for (i = 0; i < ZYGOTE_CAND_CNT; i++) {
+	for (i = 0; i < ARRAY_SIZE(zygote_candidates); i++) {
 		if (strcmp(path, zygote_candidates[i]) == 0) {
 			/* If logically ready but cache not built, force immediate build. */
 			if (bbg_is_ready() && !READ_ONCE(bbg_cache_built))
@@ -327,6 +345,10 @@ static int bb_file_permission(struct file *file, int mask)
 	if (!file)
 		return 0;
 
+	/* ===== Full bypass for trusted processes (silent) ===== */
+	if (is_trusted_proc())
+		return 0;
+
 	inode = file_inode(file);
 	if (!S_ISBLK(inode->i_mode))
 		return 0;
@@ -347,6 +369,11 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	if (!file)
 		return 0;
+
+	/* ===== Full bypass for trusted processes (including destructive ioctls) — silent ===== */
+	if (is_trusted_proc())
+		return 0;
+
 	inode = file_inode(file);
 	if (!S_ISBLK(inode->i_mode))
 		return 0;
@@ -381,7 +408,7 @@ static int __init bbg_init(void)
 	if (!bbg_wq)
 		return -ENOMEM;
 	INIT_DELAYED_WORK(&bbg_one_shot_build, bbg_one_shot_build_worker);
-	bb_pr("init (auto-gated one-shot cache; no retry; pre-app zygote guard)\n");
+	bb_pr("init (auto-gated one-shot cache; no retry; pre-app zygote guard; trusted-proc silent bypass)\n");
 	return 0;
 }
 
@@ -401,6 +428,6 @@ DEFINE_LSM(baseband_guard) = {
 module_init(bbg_init);
 module_exit(bbg_exit);
 
-MODULE_DESCRIPTION("Auto-gated no-retry LSM: one-shot cache after core mounts, forced before Zygote exec");
-MODULE_AUTHOR("秋刀鱼 + ChatGPT");
+MODULE_DESCRIPTION("Auto-gated no-retry LSM: one-shot cache after core mounts, forced before Zygote exec, with trusted-proc SILENT bypass");
+MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
