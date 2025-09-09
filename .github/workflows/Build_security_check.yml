@@ -471,11 +471,13 @@ jobs:
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
           DEF=./common/arch/arm64/configs/gki_defconfig
           {
-            CONFIG_SECURITY_BASEBAND_GUARD=y
-            CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY=y
-            CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE=y
-            CONFIG_LSM="baseband_guard,capability,landlock,lockdown,yama,selinux,bpf"
-
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD=y'
+            echo 'CONFIG_SECURITYFS=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE=y'
+            echo 'CONFIG_LSM="baseband_guard,capability,landlock,lockdown,yama,selinux,bpf"'
           } >> "$DEF"
           
           if [ "$ENABLE_B" = "BBR" ]; then
