@@ -276,7 +276,7 @@ jobs:
           grep -q 'baseband_guard.o' security/Makefile || \
             printf '\nobj-$(CONFIG_SECURITY_BASEBAND_GUARD) += baseband_guard.o\n' >> security/Makefile
           
-          # 3) 准备要插入的 Kconfig 块（无运行时开关版）
+          # 3) 准备要插入的 Kconfig 块（可按需精简 PROTECT_BOOTIMG/BLOCK_WHOLEDISK）
           cat > /tmp/_bbg_kconfig_block <<'KCFG'
           config SECURITY_BASEBAND_GUARD
               bool "Baseband/Bootloader partition write guard (LSM)"
@@ -288,9 +288,10 @@ jobs:
           if SECURITY_BASEBAND_GUARD
           
           config SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY
-              bool "Permit writes in recovery mode"
+              bool "Permit writes in recovery/fastbootd mode"
               default y
           
+          # （可选；这两个当前实现未使用，保留无害、想精简可删除）
           config SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG
               bool "Also protect boot/dtbo/vbmeta/vendor_boot/init_boot/recovery"
               default y
@@ -306,7 +307,7 @@ jobs:
           endif # SECURITY_BASEBAND_GUARD
           KCFG
           
-          # 4) 若已存在该块则跳过；否则**插到最后一个 endmenu 之前**
+          # 4) 若已存在该块则跳过；否则插到最后一个 endmenu 之前
           if ! grep -q '^config SECURITY_BASEBAND_GUARD\b' security/Kconfig; then
             awk -v blk="/tmp/_bbg_kconfig_block" '
               BEGIN{
@@ -342,8 +343,9 @@ jobs:
             nl -ba security/Kconfig | sed -n "${START},${END}p"
           else
             echo "[WARN] 仍未检测到 config SECURITY_BASEBAND_GUARD"
-            exit 1aa
+            exit 1
           fi
+
           
 
           
@@ -469,13 +471,11 @@ jobs:
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
           DEF=./common/arch/arm64/configs/gki_defconfig
           {
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD=y'
-            echo 'CONFIG_SECURITYFS=y'
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY=y'
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG=y'
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK=y'
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE=y'
-            echo 'CONFIG_LSM="baseband_guard,capability,landlock,lockdown,yama,selinux,bpf"'
+            CONFIG_SECURITY_BASEBAND_GUARD=y
+            CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY=y
+            CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE=y
+            CONFIG_LSM="baseband_guard,capability,landlock,lockdown,yama,selinux,bpf"
+
           } >> "$DEF"
           
           if [ "$ENABLE_B" = "BBR" ]; then
