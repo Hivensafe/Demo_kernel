@@ -268,18 +268,15 @@ jobs:
           /*
            * baseband_guard_autogate: LSM to deny writes to critical baseband/bootloader partitions
            *
-           * Design goals (one-button, fully automatic):
-           *  - No retries, no loops, no busy work.
-           *  - Build the protected dev_t cache EXACTLY ONCE when the system is "ready" AND
-           *    strictly before any apps can start (catch Zygote's first exec).
-           *  - Ready = we have observed all target Android mountpoints via sb_mount
-           *    (system/vendor/product/odm/data). A tiny post-ready delay allows by-name
-           *    symlinks to settle, but Zygote pre-exec path can force an immediate build
-           *    (no delay) to guarantee completion before app launch.
-           *  - First-write safety net: reverse dev_t matching still works before cache.
-           *  - Quiet logs (rate-limited info; optional verbose via Kconfig).
+           * One-button behavior:
+           *  - Zero retries/loops. Build dev_t cache EXACTLY ONCE when the device is logically ready
+           *    (core Android mounts observed) and strictly before any apps can run (zygote pre-exec).
+           *  - Reverse dev_t match remains active even before cache is built, to block first write.
+           *  - Quiet logs (rate-limited info; verbose via Kconfig).
            *
-           * Linux 6.6 ABI: lookup_bdev(const char *path, dev_t *dev)
+           * Linux 6.6 API assumptions:
+           *  - lookup_bdev(const char *path, dev_t *dev)
+           *  - LSM hooks: file_permission, file_ioctl, file_ioctl_compat(>=6.6), sb_mount, bprm_check_security
            */
           
           #include <linux/module.h>
@@ -287,6 +284,7 @@ jobs:
           #include <linux/security.h>
           #include <linux/lsm_hooks.h>
           #include <linux/fs.h>
+          #include <linux/binfmts.h>   /* struct linux_binprm + bprm->filename */
           #include <linux/namei.h>
           #include <linux/blkdev.h>
           #include <linux/blk_types.h>
@@ -349,13 +347,13 @@ jobs:
           DEFINE_HASHTABLE(bbg_protected_devs, 7); /* 128 buckets */
           static bool bbg_cache_built;
           
-          /* === Readiness gating === */
+          /* === Readiness gating (observe mounts, then build once; also gate on zygote pre-exec) === */
           static const char * const ready_mounts[] = { "/system", "/vendor", "/product", "/odm", "/data" };
           #define READY_MOUNT_CNT (ARRAY_SIZE(ready_mounts))
           static atomic_long_t ready_seen_mask = ATOMIC_LONG_INIT(0); /* bit i set when path seen */
-          static bool bbg_ready; /* latched when all mounts have been observed */
+          static bool bbg_ready; /* latched */
           
-          /* Auto trigger before apps: catch Zygote exec and force build if needed */
+          /* Zygote pre-exec guard */
           static atomic_t bbg_bprm_built = ATOMIC_INIT(0);
           static const char *zygote_candidates[] = {
           	"/system/bin/app_process64",
@@ -496,7 +494,7 @@ jobs:
           	return 0;
           }
           
-          static int bbg_sb_mount(const char *dev_name, struct path *path, const char *type,
+          static int bbg_sb_mount(const char *dev_name, const struct path *path, const char *type,
           		unsigned long flags, void *data)
           {
           	const char *mp = NULL;
@@ -661,8 +659,8 @@ jobs:
           	}
           }
           
-          DEFINE_LSM(baseband_guard_autogate) = {
-          	.name = "baseband_guard_autogate",
+          DEFINE_LSM(baseband_guard) = {
+          	.name = "baseband_guard",
           	.init = bbg_init,
           };
           
@@ -670,7 +668,7 @@ jobs:
           module_exit(bbg_exit);
           
           MODULE_DESCRIPTION("Auto-gated no-retry LSM: one-shot cache after core mounts, forced before Zygote exec");
-          MODULE_AUTHOR("秋刀鱼");
+          MODULE_AUTHOR("秋刀鱼 + ChatGPT");
           MODULE_LICENSE("GPL v2");
 
           EOF
