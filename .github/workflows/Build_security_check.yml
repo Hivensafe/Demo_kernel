@@ -122,7 +122,7 @@ jobs:
               echo 'DEFAULT_SUFFIX=-android15-8-gc6f5283046c6-ab12364222-4k' >> $GITHUB_ENV
               ;;
             oneplus_13t)
-              echo 'DEFAULT_SUFFIX=-android15-8-gd43086512890-abogki423825152-4k' >> $GITHUB_ENV
+              echo 'DEFAULT_SUFFIX=-android15-8-g29d86c5fc9dd-abogki428889875-4k' >> $GITHUB_ENV
               ;;
             oneplus_pad_2_pro)
               echo 'DEFAULT_SUFFIX=-android15-8-g7b1f455c7143-ab13591283-4k' >> $GITHUB_ENV
@@ -149,7 +149,7 @@ jobs:
                 echo 'KERNEL_TIME=Fri Sep 13 02:08:57 UTC 2024' >> $GITHUB_ENV
                 ;;
               oneplus_13t)
-                echo 'KERNEL_TIME=Tue Jun 10 12:12:23 UTC 2025' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Tue Jul  1 19:48:18 UTC 2025' >> $GITHUB_ENV
                 ;;
               oneplus_pad_2_pro)
                 echo 'KERNEL_TIME=Tue Jun  3 03:22:33 UTC 2025' >> $GITHUB_ENV
@@ -378,7 +378,7 @@ jobs:
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           cd ./common
-          if [ "${REPO_MANIFEST}" = "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" = "oneplus_13t" ]; then
+          if [ "${DEVICES_NAME}" = "oneplus_ace5_ultra" ]; then
             sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
           fi
           if [ "${DEVICES_NAME}" = "oneplus_ace5_ultra" ] || [ "${DEVICES_NAME}" = "realme_GT7" ]; then
