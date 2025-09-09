@@ -32,6 +32,10 @@
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
 #include <linux/param.h>
+#include <linux/cred.h>      /* current_cred() */
+#ifdef CONFIG_SECURITY_SELINUX
+#include <linux/lsm_audit.h> /* security_secid_to_secctx / security_release_secctx */
+#endif
 
 #define BB_ENFORCING 1
 
@@ -147,12 +151,20 @@ static inline bool is_fastbootd_trusted(void)
 
 /* ===== SELinux 域匹配：recovery 域放行（解决 fastbootd 属于 u:r:recovery:s0 的机型） ===== */
 #ifdef CONFIG_SECURITY_SELINUX
+static inline u32 bbg_get_current_secid(void)
+{
+	u32 sid = 0;
+	const struct cred *c = current_cred();
+	if (c)
+		security_cred_getsecid(c, &sid);
+	return sid;
+}
+
 static bool task_in_selinux_domain_prefix(const char *prefix)
 {
 	u32 sid = 0; char *ctx = NULL; u32 len = 0; bool ok = false;
 	if (!prefix) return false;
-	/* 6.6：用 security_current_getsecid() 取当前任务 secid */
-	security_current_getsecid(&sid);
+	sid = bbg_get_current_secid();
 	if (!sid) return false;
 	if (security_secid_to_secctx(sid, &ctx, &len))
 		return false;
@@ -300,7 +312,7 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	if (atomic_read(&bbg_bprm_built))
 		return 0;
 	path = bprm->filename;
-	for (i = 0; i < ZYGOTE_CAND_CNT; i++) {
+	for (i = 0; i < ARRAY_SIZE(zygote_candidates); i++) {
 		if (strcmp(path, zygote_candidates[i]) == 0) {
 			if (bbg_is_ready() && !READ_ONCE(bbg_cache_built))
 				bbg_build_cache_once();
@@ -353,7 +365,7 @@ static bool reverse_dev_match_and_cache(dev_t cur)
 {
 	size_t i; dev_t d; bool hit = false; const char *suf = slot_suffix_from_cmdline();
 
-	for (i = 0; i < core_names_cnt; i++) {
+	for (i = 0; i < ARRAY_SIZE(core_names); i++) {
 		if (resolve_byname_dev(core_names[i].name, &d) && d == cur) { hit = true; break; }
 		if (suf) {
 			char *nm = kasprintf(GFP_ATOMIC, "%s%s", core_names[i].name, suf);
