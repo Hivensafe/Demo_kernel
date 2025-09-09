@@ -1,19 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * baseband_guard_autogate: LSM to deny writes to critical baseband/bootloader partitions
- *
- *  - Zero retries/loops. Build dev_t cache EXACTLY ONCE after core mounts,
- *    and force-build before Zygote exec if still pending.
- *  - Reverse dev_t match blocks the very first write even before cache build.
- *  - Quiet logs (only ratelimited DENY); trusted bypass is SILENT.
- *
- *  This variant:
- *   * WHITELISTS rmt_storage & update_engine family (SILENT).
- *   * WHITELISTS fastbootd only in recovery/fastbootd mode (SILENT), including its short ancestor chain.
- *   * WHITELISTS any task in SELinux domain prefix "u:r:recovery:s0" (SILENT),
- *     solving devices where fastbootd runs under recovery domain.
- */
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/security.h>
