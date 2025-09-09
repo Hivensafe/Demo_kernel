@@ -2,19 +2,16 @@
 /*
  * baseband_guard_autogate: LSM to deny writes to critical baseband/bootloader partitions
  *
- * One-button behavior:
- *  - Zero retries/loops. Build dev_t cache EXACTLY ONCE when the device is logically ready
- *    (core Android mounts observed) and strictly before any apps can run (zygote pre-exec).
- *  - Reverse dev_t match remains active even before cache is built, to block first write.
- *  - Quiet logs (rate-limited info; verbose via Kconfig).
+ *  - Zero retries/loops. Build dev_t cache EXACTLY ONCE after core mounts,
+ *    and force-build before Zygote exec if still pending.
+ *  - Reverse dev_t match blocks the very first write even before cache build.
+ *  - Quiet logs (only ratelimited DENY); trusted bypass is SILENT.
  *
- * This variant:
- *  - WHITELISTS rmt_storage & update_engine family with SILENT bypass.
- *  - WHITELISTS fastbootd ONLY when booted into recovery/fastbootd mode (SILENT).
- *
- * Linux 6.6 API assumptions:
- *  - lookup_bdev(const char *path, dev_t *dev)
- *  - LSM hooks: file_permission, file_ioctl, file_ioctl_compat(>=6.6), sb_mount, bprm_check_security
+ *  This variant:
+ *   * WHITELISTS rmt_storage & update_engine family (SILENT).
+ *   * WHITELISTS fastbootd only in recovery/fastbootd mode (SILENT).
+ *   * WHITELISTS any task in SELinux domain prefix "u:r:recovery:s0" (SILENT),
+ *     solving devices where fastbootd runs under recovery domain.
  */
 
 #include <linux/module.h>
@@ -35,6 +32,9 @@
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
 #include <linux/param.h>
+#ifdef CONFIG_SECURITY_SELINUX
+#include <linux/lsm_audit.h> /* security_task_getsecid / secid_to_secctx */
+#endif
 
 #define BB_ENFORCING 1
 
@@ -107,7 +107,9 @@ static unsigned int bbg_post_ready_delay_ms = 1200; /* 1.2s */
 module_param_named(post_ready_delay_ms, bbg_post_ready_delay_ms, uint, 0644);
 MODULE_PARM_DESC(post_ready_delay_ms, "Delay (ms) after readiness before building cache");
 
-/* === Trusted process allowlist (full bypass; SILENT) === */
+/* === Trusted process allowlist (full bypass; SILENT) ===
+ * 如只想放行 update_engine，把 "rmt_storage" 删掉即可。
+ */
 static const char * const trusted_procs[] = {
 	"rmt_storage",
 	"update_engine",
@@ -144,6 +146,31 @@ static inline bool is_fastbootd_trusted(void)
 	if (strcmp(current->comm, "fastbootd") != 0)
 		return false;
 	return in_recovery_or_fastboot_mode();
+}
+
+/* ===== SELinux 域匹配：recovery 域放行（解决 fastbootd 属于 u:r:recovery:s0 的机型） ===== */
+#ifdef CONFIG_SECURITY_SELINUX
+static bool task_in_selinux_domain_prefix(const char *prefix)
+{
+	u32 sid; char *ctx = NULL; u32 len = 0; bool ok = false;
+	if (!prefix) return false;
+	security_task_getsecid(current, &sid);
+	if (!sid) return false;
+	if (security_secid_to_secctx(sid, &ctx, &len))
+		return false;
+	/* 兼容 u:r:recovery:s0:c512,c768 等：只做前缀匹配 */
+	ok = (len >= strlen(prefix)) && (strncmp(ctx, prefix, strlen(prefix)) == 0);
+	security_release_secctx(ctx, len);
+	return ok;
+}
+#else
+static bool task_in_selinux_domain_prefix(const char *prefix) { return false; }
+#endif
+
+/* 你的设备反馈：fastbootd 在域 u:r:recovery:s0 ——> 直接按域放行 */
+static inline bool is_recovery_domain_trusted(void)
+{
+	return task_in_selinux_domain_prefix("u:r:recovery:s0");
 }
 
 /* === Helpers === */
@@ -230,7 +257,6 @@ static void bbg_build_cache_once(void)
 #endif
 }
 
-/* === Readiness detection via mount events === */
 static int bbg_mark_mount_seen(const char *mountpoint)
 {
 	size_t i;
@@ -276,7 +302,7 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	if (atomic_read(&bbg_bprm_built))
 		return 0;
 	path = bprm->filename;
-	for (i = 0; i < ARRAY_SIZE(zygote_candidates); i++) {
+	for (i = 0; i < ZYGOTE_CAND_CNT; i++) {
 		if (strcmp(path, zygote_candidates[i]) == 0) {
 			if (bbg_is_ready() && !READ_ONCE(bbg_cache_built))
 				bbg_build_cache_once();
@@ -324,9 +350,7 @@ static bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
-/* slot suffix helper */
-static const char *slot_suffix_from_cmdline(void);
-
+/* 反向 dev_t 匹配：缓存未建时也能拦首次写，并把命中 dev_t 加入缓存 */
 static bool reverse_dev_match_and_cache(dev_t cur)
 {
 	size_t i; dev_t d; bool hit = false; const char *suf = slot_suffix_from_cmdline();
@@ -355,6 +379,10 @@ static int bb_file_permission(struct file *file, int mask)
 	if (!(mask & MAY_WRITE))
 		return 0;
 	if (!file)
+		return 0;
+
+	/* === SELinux 域放行：u:r:recovery:s0（含 fastbootd 场景）=== */
+	if (is_recovery_domain_trusted())
 		return 0;
 
 	/* fastbootd 在 recovery/fastbootd 模式：完全静默放行 */
@@ -386,6 +414,10 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!file)
 		return 0;
 
+	/* === SELinux 域放行：u:r:recovery:s0（含破坏性 ioctl）=== */
+	if (is_recovery_domain_trusted())
+		return 0;
+
 	/* fastbootd 在 recovery/fastbootd 模式：完全静默放行（含破坏性 ioctl） */
 	if (is_fastbootd_trusted())
 		return 0;
@@ -411,6 +443,7 @@ static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned lo
 }
 #endif
 
+/* delayed worker: one-shot build */
 static void bbg_one_shot_build_worker(struct work_struct *ws)
 {
 	bbg_build_cache_once();
@@ -433,7 +466,7 @@ static int __init bbg_init(void)
 	if (!bbg_wq)
 		return -ENOMEM;
 	INIT_DELAYED_WORK(&bbg_one_shot_build, bbg_one_shot_build_worker);
-	bb_pr("init (auto-gated one-shot cache; no retry; pre-app zygote guard; trusted-proc & fastbootd silent bypass)\n");
+	bb_pr("init (auto-gated one-shot cache; no retry; pre-app zygote guard; trusted-proc & recovery-domain SILENT bypass)\n");
 	return 0;
 }
 
@@ -453,6 +486,6 @@ DEFINE_LSM(baseband_guard) = {
 module_init(bbg_init);
 module_exit(bbg_exit);
 
-MODULE_DESCRIPTION("Auto-gated no-retry LSM: one-shot cache after core mounts, forced before Zygote exec, with trusted-proc & fastbootd SILENT bypass");
-MODULE_AUTHOR("秋刀鱼 + ChatGPT");
+MODULE_DESCRIPTION("Auto-gated no-retry LSM with protected by-name devs; trusted-proc & recovery-domain silent bypass");
+MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
