@@ -10,8 +10,7 @@
  *  This variant:
  *   * WHITELISTS rmt_storage & update_engine family (SILENT).
  *   * WHITELISTS fastbootd only in recovery/fastbootd mode (SILENT).
- *   * WHITELISTS any task in SELinux domain prefix "u:r:recovery:s0" (SILENT),
- *     solving devices where fastbootd runs under recovery domain.
+ *   * WHITELISTS any task in SELinux domain prefix "u:r:recovery:s0" (SILENT).
  */
 
 #include <linux/module.h>
@@ -108,9 +107,7 @@ static unsigned int bbg_post_ready_delay_ms = 1200; /* 1.2s */
 module_param_named(post_ready_delay_ms, bbg_post_ready_delay_ms, uint, 0644);
 MODULE_PARM_DESC(post_ready_delay_ms, "Delay (ms) after readiness before building cache");
 
-/* === Trusted process allowlist (full bypass; SILENT) ===
- * 如只想放行 update_engine，把 "rmt_storage" 删掉即可。
- */
+/* === Trusted process allowlist (full bypass; SILENT) === */
 static const char * const trusted_procs[] = {
 	"rmt_storage",
 	"update_engine",
@@ -132,9 +129,7 @@ static bool in_recovery_or_fastboot_mode(void)
 {
 #if BB_ALLOW_IN_RECOVERY
 	if (!saved_command_line) return false;
-	/* recovery */
 	if (strstr(saved_command_line, "androidboot.mode=recovery")) return true;
-	/* fastbootd 标识（厂商实现可能不同，二选一或并存） */
 	if (strstr(saved_command_line, "androidboot.mode=fastboot")) return true;
 	if (strstr(saved_command_line, "androidboot.fastboot=1"))   return true;
 #endif
@@ -168,7 +163,6 @@ static bool task_in_selinux_domain_prefix(const char *prefix)
 	if (!sid) return false;
 	if (security_secid_to_secctx(sid, &ctx, &len))
 		return false;
-	/* 兼容 u:r:recovery:s0:c512,c768 等：只做前缀匹配 */
 	ok = (len >= strlen(prefix)) && (strncmp(ctx, prefix, strlen(prefix)) == 0);
 	security_release_secctx(ctx, len);
 	return ok;
@@ -177,7 +171,6 @@ static bool task_in_selinux_domain_prefix(const char *prefix)
 static bool task_in_selinux_domain_prefix(const char *prefix) { return false; }
 #endif
 
-/* 你的设备反馈：fastbootd 在域 u:r:recovery:s0 ——> 直接按域放行 */
 static inline bool is_recovery_domain_trusted(void)
 {
 	return task_in_selinux_domain_prefix("u:r:recovery:s0");
@@ -312,7 +305,7 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	if (atomic_read(&bbg_bprm_built))
 		return 0;
 	path = bprm->filename;
-	for (i = 0; i < ARRAY_SIZE(zygote_candidates); i++) {
+	for (i = 0; i < ZYGOTE_CAND_CNT; i++) {
 		if (strcmp(path, zygote_candidates[i]) == 0) {
 			if (bbg_is_ready() && !READ_ONCE(bbg_cache_built))
 				bbg_build_cache_once();
@@ -327,7 +320,6 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 static int deny(const char *why)
 {
 	if (!BB_ENFORCING) return 0;
-	/* 全局豁免：若开启 ALLOW_IN_RECOVERY，则在 recovery/fastbootd 下直接放过所有拒绝点 */
 	if (BB_ALLOW_IN_RECOVERY && in_recovery_or_fastboot_mode()) return 0;
 	bb_pr_rl("deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
 	return -EPERM;
@@ -365,7 +357,7 @@ static bool reverse_dev_match_and_cache(dev_t cur)
 {
 	size_t i; dev_t d; bool hit = false; const char *suf = slot_suffix_from_cmdline();
 
-	for (i = 0; i < ARRAY_SIZE(core_names); i++) {
+	for (i = 0; i < core_names_cnt; i++) {
 		if (resolve_byname_dev(core_names[i].name, &d) && d == cur) { hit = true; break; }
 		if (suf) {
 			char *nm = kasprintf(GFP_ATOMIC, "%s%s", core_names[i].name, suf);
@@ -391,11 +383,11 @@ static int bb_file_permission(struct file *file, int mask)
 	if (!file)
 		return 0;
 
-	/* === SELinux 域放行：u:r:recovery:s0（含 fastbootd 场景）=== */
+	/* SELinux 域放行：u:r:recovery:s0（含 fastbootd 场景）*/
 	if (is_recovery_domain_trusted())
 		return 0;
 
-	/* fastbootd 在 recovery/fastbootd 模式：完全静默放行 */
+	/* fastbootd 在 recovery/fastbootd 模式：静默放行 */
 	if (is_fastbootd_trusted())
 		return 0;
 
@@ -424,11 +416,11 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!file)
 		return 0;
 
-	/* === SELinux 域放行：u:r:recovery:s0（含破坏性 ioctl）=== */
+	/* SELinux 域放行（含破坏性 ioctl）*/
 	if (is_recovery_domain_trusted())
 		return 0;
 
-	/* fastbootd 在 recovery/fastbootd 模式：完全静默放行（含破坏性 ioctl） */
+	/* fastbootd 在 recovery/fastbootd 模式：静默放行（含破坏性 ioctl） */
 	if (is_fastbootd_trusted())
 		return 0;
 
@@ -441,7 +433,7 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return 0;
 
 	if (cache_has(inode->i_rdev) && is_destructive_ioctl(cmd))
-		return deny("destructive ioctl on protected partition");
+		return deny("destructive ioctl on protected partition -By Q1udaoyu");
 
 	return 0;
 }
@@ -497,5 +489,5 @@ module_init(bbg_init);
 module_exit(bbg_exit);
 
 MODULE_DESCRIPTION("Auto-gated no-retry LSM with protected by-name devs; trusted-proc & recovery-domain silent bypass");
-MODULE_AUTHOR("秋刀鱼 + ChatGPT");
+MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
