@@ -32,9 +32,6 @@
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
 #include <linux/param.h>
-#ifdef CONFIG_SECURITY_SELINUX
-#include <linux/lsm_audit.h> /* security_task_getsecid / secid_to_secctx */
-#endif
 
 #define BB_ENFORCING 1
 
@@ -152,9 +149,10 @@ static inline bool is_fastbootd_trusted(void)
 #ifdef CONFIG_SECURITY_SELINUX
 static bool task_in_selinux_domain_prefix(const char *prefix)
 {
-	u32 sid; char *ctx = NULL; u32 len = 0; bool ok = false;
+	u32 sid = 0; char *ctx = NULL; u32 len = 0; bool ok = false;
 	if (!prefix) return false;
-	security_task_getsecid(current, &sid);
+	/* 6.6：用 security_current_getsecid() 取当前任务 secid */
+	security_current_getsecid(&sid);
 	if (!sid) return false;
 	if (security_secid_to_secctx(sid, &ctx, &len))
 		return false;
@@ -487,5 +485,5 @@ module_init(bbg_init);
 module_exit(bbg_exit);
 
 MODULE_DESCRIPTION("Auto-gated no-retry LSM with protected by-name devs; trusted-proc & recovery-domain silent bypass");
-MODULE_AUTHOR("秋刀鱼");
+MODULE_AUTHOR("秋刀鱼 + ChatGPT");
 MODULE_LICENSE("GPL v2");
