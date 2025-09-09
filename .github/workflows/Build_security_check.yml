@@ -247,269 +247,106 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: 📝 Write baseband_guard sources (safe)
-        working-directory: kernel_workspace/kernel_platform/common
-        run: |
-          mkdir -p security
-
-          # ---- header ----
-          cat > security/baseband_guard_op13.h <<'H'
-          /* SPDX-License-Identifier: GPL-2.0 */
-          /* Superset list: Qualcomm + MediaTek Dimensity critical partitions.
-           * A/B 后缀由 LSM 自动匹配（_a/_b 无需重复书写）。
-           */
-          static const char * const protected_names[] = {
-            /* === Baseband / NV (Dimensity + common) === */
-            "modem","md_sec","nvram","nvdata","nvcfg",
-          
-            /* === Bootloader / secure firmware chain (Dimensity) === */
-            "preloader_raw","lk","tee","gz","rotfw","pvmfw",
-            "spmfw","sspm","scp","mcupm","dpm","bootloader1","bootloader2",
-          
-            /* === Connectivity firmwares (Dimensity) === */
-            "connsys_bt","connsys_wifi","connsys_gnss",
-          
-            /* === Multimedia / co-processors (Dimensity) === */
-            "apusys","gpueb","vcp","ccu","audio_dsp","mvpu_algo",
-          
-            /* === Device/rollback security info (Dimensity) === */
-            "proinfo","protect1","protect2","sec1","seccfg","frp","otp",
-          
-            /* === AVB chain (common/Dimensity) === */
-            "vbmeta","vbmeta_system","vbmeta_vendor","vbmeta_product","vb",
-          
-            /* === Qualcomm common=== */
-            "modemst1","modemst2","fsg","fsc","bluetooth",
-            "persist","qweslicstore","oplusstanvbk","oplusdycnvbk","mdm1oemnvbktmp",
-            "xbl","xbl_config","abl","tz","hyp","cmnlib","cmnlib64",
-            "keymaster","aop","aop_config","devcfg","qupfw",
-            "uefisecapp","uefivarstore","ocdt",
-            NULL,
-          };
-          H
-
-          # ---- source ----
-          cat > security/baseband_guard.c <<'C'
-          // SPDX-License-Identifier: GPL-2.0
-          #include <linux/kernel.h>
-          #include <linux/lsm_hooks.h>
-          #include <linux/fs.h>
-          #include <linux/dcache.h>
-          #include <linux/namei.h>
-          #include <linux/blkdev.h>
-          #include <linux/uaccess.h>
-          #include <linux/slab.h>
-          #include <linux/moduleparam.h>
-          #include <linux/string.h>
-
-          #ifndef BLKDISCARD
-          #define BLKDISCARD     _IO(0x12,119)
-          #endif
-          #ifndef BLKSECDISCARD
-          #define BLKSECDISCARD  _IO(0x12,125)
-          #endif
-          #ifndef BLKZEROOUT
-          #define BLKZEROOUT     _IO(0x12,127)
-          #endif
-          #ifndef BLKPG
-          #define BLKPG          _IO(0x12,105)
-          #endif
-
-          static int guard_enabled = 1;
-          module_param(guard_enabled, int, 0644);
-
-          static int allow_in_recovery = 1;
-          module_param(allow_in_recovery, int, 0644);
-
-          static int protect_bootimg = 0;
-          module_param(protect_bootimg, int, 0644);
-
-          static int block_wholedisk = 1;
-          module_param(block_wholedisk, int, 0644);
-
-          #include "baseband_guard_op13.h"
-
-          static const char * const bootimg_names[] = {
-            "boot","vendor_boot","dtbo","init_boot",NULL,
-          };
-
-          extern char *saved_command_line;
-          static bool bb_cmdline_is_recovery(void) {
-            if (!saved_command_line) return false;
-            return strstr(saved_command_line,"androidboot.mode=recovery") ||
-                   strstr(saved_command_line,"bootmode=recovery");
-          }
-          static bool bb_should_block(void) {
-            if (!guard_enabled) return false;
-            if (allow_in_recovery && bb_cmdline_is_recovery()) return false;
-            return true;
-          }
-
-          /* safe helpers for d_path() */
-          static bool bb_get_path_str(const struct path *path,char **out,char **page){
-            char *buf,*p;
-            if(!path||!out||!page) return false;
-            buf=(char *)__get_free_page(GFP_KERNEL);
-            if(!buf) return false;
-            p=d_path(path,buf,PAGE_SIZE);
-            if(IS_ERR(p)){free_page((unsigned long)buf);return false;}
-            *out=p;*page=buf;return true;
-          }
-          static bool bb_get_file_path_str(struct file *f,char **out,char **page){
-            if(!f) return false;
-            return bb_get_path_str(&f->f_path,out,page);
-          }
-
-          static bool bb_match_byname(const char *path,const char *name){
-            char needle[96];
-            snprintf(needle,sizeof(needle),"/by-name/%s",name);
-            if (strstr(path,needle)) return true;
-            snprintf(needle,sizeof(needle),"/by-name/%s_a",name);
-            if (strstr(path,needle)) return true;
-            snprintf(needle,sizeof(needle),"/by-name/%s_b",name);
-            if (strstr(path,needle)) return true;
-            return false;
-          }
-          static bool bb_match_any(const char *path){
-            const char * const *p;
-            if (!path||!strstr(path,"/dev/block/")) return false;
-            for(p=protected_names;*p;++p)
-              if (bb_match_byname(path,*p)) return true;
-            if (protect_bootimg)
-              for(p=bootimg_names;*p;++p)
-                if (bb_match_byname(path,*p)) return true;
-            return false;
-          }
-          static bool bb_path_is_wholedisk(const char *path){
-            if (!path||!strstr(path,"/dev/block/")) return false;
-            if (strstr(path,"/mmcblk")&&!strstr(path,"p")) return true;
-            if (strstr(path,"/nvme")&&strstr(path,"n")&&!strstr(path,"p")) return true;
-            return false;
-          }
-          static bool bb_path_is_passthru_chr(const char *path){
-            return path && (strstr(path,"/dev/sg")||strstr(path,"/dev/bsg/")||strstr(path,"/dev/nvme"));
-          }
-
-          static bool bb_should_deny_file_write(struct file *f){
-            char *buf=NULL,*p=NULL;bool deny=false;
-            if(!bb_should_block()||!f||!file_inode(f)) return false;
-            if(S_ISCHR(file_inode(f)->i_mode)){
-              if(bb_get_file_path_str(f,&p,&buf)){deny=bb_path_is_passthru_chr(p);free_page((unsigned long)buf);}
-              return deny;
-            }
-            if(S_ISBLK(file_inode(f)->i_mode)){
-              if(bb_get_file_path_str(f,&p,&buf)){
-                if(bb_match_any(p)) deny=true;
-                else if(block_wholedisk&&bb_path_is_wholedisk(p)) deny=true;
-                free_page((unsigned long)buf);
-              }
-            }
-            return deny;
-          }
-
-          static int bb_file_open(struct file *file){
-            if (file && (file->f_flags & (O_WRONLY|O_RDWR)) && bb_should_deny_file_write(file)) {
-                char *buf=NULL, *p=NULL;
-                if (bb_get_file_path_str(file, &p, &buf)) {
-                    pr_warn("baseband_guard: DENY open-for-write %s (flags=0x%x)\n",
-                            p, file->f_flags);
-                    free_page((unsigned long)buf);
-                } else {
-                    pr_warn("baseband_guard: DENY open-for-write (flags=0x%x, path=unknown)\n",
-                            file->f_flags);
-                }
-                return -EPERM;
-            }
-            return 0;
-          }
-          
-          static int bb_file_permission(struct file *file,int mask){
-            if((mask&MAY_WRITE)&&bb_should_deny_file_write(file)) return -EPERM;
-            return 0;
-          }
-          
-          static int bb_file_ioctl(struct file *file,unsigned int cmd,unsigned long arg){
-            if(!bb_should_block()||!file||!file_inode(file)) return 0;
-            if(S_ISCHR(file_inode(file)->i_mode)){
-              if(bb_should_deny_file_write(file)) return -EPERM;
-              return 0;
-            }
-            if(S_ISBLK(file_inode(file)->i_mode)){
-              if(!bb_should_deny_file_write(file)) return 0;
-              switch(cmd){
-              case BLKDISCARD:case BLKSECDISCARD:case BLKZEROOUT:case BLKPG:
-                return -EPERM;
-              default: break;
-              }
-            }
-            return 0;
-          }
-
-          static struct security_hook_list bb_hooks[] __ro_after_init = {
-            LSM_HOOK_INIT(file_open, bb_file_open),
-            LSM_HOOK_INIT(file_permission, bb_file_permission),
-            LSM_HOOK_INIT(file_ioctl, bb_file_ioctl),
-          };
-
-          static int __init bb_init(void){
-            security_add_hooks(bb_hooks,ARRAY_SIZE(bb_hooks),"baseband_guard");
-            pr_info("baseband_guard: init (enabled=%d recovery=%d bootimg=%d wholedisk=%d)\n",
-              guard_enabled,allow_in_recovery,protect_bootimg,block_wholedisk);
-            return 0;
-          }
-          DEFINE_LSM(baseband_guard) = { .name="baseband_guard", .init=bb_init };
-          C
-
-          git add security/baseband_guard.c security/baseband_guard_op13.h
-          git commit -m "add safe baseband_guard LSM"
-
-      - name: 🔧 Wire Makefile & Kconfig
-        working-directory: kernel_workspace/kernel_platform/common
-        run: |
-          grep -q 'baseband_guard.o' security/Makefile || \
-            echo 'obj-$(CONFIG_SECURITY_BASEBAND_GUARD) += baseband_guard.o' >> security/Makefile
-          echo '
-          config SECURITY_BASEBAND_GUARD
-            bool "Deny writes to baseband/bootloader partitions (Android)"
-            depends on SECURITY
-            default y
-          ' >> security/Kconfig
-          git add security/Makefile security/Kconfig
-          git commit -m "wire baseband_guard into Makefile/Kconfig"
-
-      - name: ✅ Enable defconfig & LSM
-        working-directory: kernel_workspace/kernel_platform/common
-        run: |
-          DEFCONFIG=arch/arm64/configs/gki_defconfig
-          grep -q CONFIG_SECURITY_BASEBAND_GUARD "$DEFCONFIG" || \
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD=y' >> "$DEFCONFIG"
-          CUR=$(grep '^CONFIG_LSM=' "$DEFCONFIG" | sed -e 's/^CONFIG_LSM="//' -e 's/"$//')
-          [ -z "$CUR" ] && CUR="yama,integrity,selinux"
-          case ",$CUR," in
-            *",baseband_guard,"*) NEW="$CUR";;
-            *) NEW="${CUR},baseband_guard";;
-          esac
-          sed -i '/^CONFIG_LSM=/d' "$DEFCONFIG"
-          echo "CONFIG_LSM=\"$NEW\"" >> "$DEFCONFIG"
-          git add "$DEFCONFIG"
-          git commit -m "configs: enable baseband_guard"
-
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          # 防重复 patch
-          if grep -q 'SOC_SN_CHECK' init/main.c; then
-            echo "main.c 已包含 patch, 跳过"
-            exit 0
+          # # 防重复 patch
+          # if grep -q 'SOC_SN_CHECK' init/main.c; then
+          #   echo "main.c 已包含 patch, 跳过"
+          #   exit 0
+          # fi
+          # cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
+          # LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
+          # head -n "$LINE" init/main.c > init/main.c.patched
+          # cat serialid_check.c >> init/main.c.patched
+          # tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
+          # mv init/main.c.patched init/main.c
+          # echo "已自动插入 serialid_check.c 到 main.c"
+
+          cp "${GITHUB_WORKSPACE}/BACKUP/baseband_guard.c" ./baseband_guard.c
+          set -euo pipefail
+          # 0) 位置自检
+          test -f security/Kconfig || { echo "[ERR] 请在 kernel_workspace/kernel_platform/common 目录执行（找不到 security/Kconfig）"; exit 1; }
+          
+          # 1) 备份
+          cp -a security/Kconfig security/Kconfig.bak.$(date +%s)
+          cp -a security/Makefile security/Makefile.bak.$(date +%s)
+          
+          # 2) Makefile 追加目标（若未追加过）
+          grep -q 'baseband_guard.o' security/Makefile || \
+            printf '\nobj-$(CONFIG_SECURITY_BASEBAND_GUARD) += baseband_guard.o\n' >> security/Makefile
+          
+          # 3) 准备要插入的 Kconfig 块（无运行时开关版）
+          cat > /tmp/_bbg_kconfig_block <<'KCFG'
+          config SECURITY_BASEBAND_GUARD
+              bool "Baseband/Bootloader partition write guard (LSM)"
+              help
+                Deny all writes (including BLKDISCARD/BLKZEROOUT/BLKSECDISCARD, etc.) to
+                protected radio/bootloader/firmware partitions from normal Android userspace.
+                Always enforcing at runtime. No /sys/module parameters.
+          
+          if SECURITY_BASEBAND_GUARD
+          
+          config SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY
+              bool "Permit writes in recovery mode"
+              default y
+          
+          config SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG
+              bool "Also protect boot/dtbo/vbmeta/vendor_boot/init_boot/recovery"
+              default y
+          
+          config SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK
+              bool "Also block whole-disk nodes (sda, mmcblk0, nvme*, dm-*)"
+              default y
+          
+          config SECURITY_BASEBAND_GUARD_VERBOSE
+              bool "Log denials to dmesg"
+              default y
+          
+          endif # SECURITY_BASEBAND_GUARD
+          KCFG
+          
+          # 4) 若已存在该块则跳过；否则**插到最后一个 endmenu 之前**
+          if ! grep -q '^config SECURITY_BASEBAND_GUARD\b' security/Kconfig; then
+            awk -v blk="/tmp/_bbg_kconfig_block" '
+              BEGIN{
+                while ((getline l < blk) > 0) block = block l "\n";
+                close(blk);
+              }
+              {
+                line[++NR_total] = $0;
+                if ($0 ~ /^endmenu[[:space:]]*$/) last_endmenu = NR_total;
+              }
+              END{
+                if (!last_endmenu) { # 没找到 endmenu，就附加到文件尾
+                  for (i=1; i<=NR_total; ++i) print line[i];
+                  printf("%s", block);
+                  exit;
+                }
+                for (i=1; i<=NR_total; ++i) {
+                  if (i == last_endmenu) printf("%s", block);
+                  print line[i];
+                }
+              }' security/Kconfig > security/Kconfig.new
+            mv security/Kconfig.new security/Kconfig
           fi
-      
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
-          LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
-          head -n "$LINE" init/main.c > init/main.c.patched
-          cat serialid_check.c >> init/main.c.patched
-          tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
-          mv init/main.c.patched init/main.c
-          echo "已自动插入 serialid_check.c 到 main.c"
+          
+          # 5) 打印验证（行号）
+          echo "===== security/Makefile 增加项检查 ====="
+          grep -n 'baseband_guard.o' security/Makefile || echo "[WARN] 未找到行"
+          echo "===== security/Kconfig 插入位置预览（上下各显示几行） ====="
+          LINE=$(grep -n '^config SECURITY_BASEBAND_GUARD\b' security/Kconfig | head -n1 | cut -d: -f1 || true)
+          if [ -n "${LINE:-}" ]; then
+            START=$(( LINE>5 ? LINE-5 : 1 ))
+            END=$(( LINE+35 ))
+            nl -ba security/Kconfig | sed -n "${START},${END}p"
+          else
+            echo "[WARN] 仍未检测到 config SECURITY_BASEBAND_GUARD"
+            exit 1aa
+          fi
+          
+
+          
 
 
             
@@ -630,8 +467,17 @@ jobs:
           echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KERNEL_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig          
-
+          DEF=./common/arch/arm64/configs/gki_defconfig
+          {
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD=y'
+            echo 'CONFIG_SECURITYFS=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE=y'
+            echo 'CONFIG_LSM="baseband_guard,capability,landlock,lockdown,yama,selinux,bpf"'
+          } >> "$DEF"
+          
           if [ "$ENABLE_B" = "BBR" ]; then
             echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
