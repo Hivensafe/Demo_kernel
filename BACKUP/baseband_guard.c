@@ -87,7 +87,7 @@ MODULE_PARM_DESC(post_ready_delay_ms, "Delay (ms) after readiness before buildin
 static const char * const trusted_procs[] = {
 	"update_engine",
 	"update_engine_sideload",
-	"updata_engien", /* 容错拼写 */
+	"rmt_storage", 
 };
 
 static inline bool is_trusted_proc(void)
@@ -242,7 +242,6 @@ static int bbg_sb_mount(const char *dev_name, const struct path *path, const cha
 }
 
 /* Zygote pre-exec guard */
-static int bbg_bprm_check_security(struct linux_binfrpm *bprm);
 static int bbg_bprm_check_security(struct linux_binprm *bprm)
 {
 	size_t i; const char *path;
