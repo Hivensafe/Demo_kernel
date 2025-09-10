@@ -16,20 +16,11 @@
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
 #include <linux/param.h>
-#include <linux/cred.h>      /* current_cred() */
+#include <linux/cred.h>
 #include <linux/sched.h>     /* task_struct, TASK_COMM_LEN */
 #include <linux/rcupdate.h>  /* rcu_dereference() */
-#ifdef CONFIG_SECURITY_SELINUX
-#include <linux/lsm_audit.h> /* security_secid_to_secctx / security_release_secctx */
-#endif
 
 #define BB_ENFORCING 1
-
-#ifdef CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY
-#define BB_ALLOW_IN_RECOVERY 1
-#else
-#define BB_ALLOW_IN_RECOVERY 0
-#endif
 
 #ifdef CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE
 #define BB_VERBOSE 1
@@ -41,8 +32,6 @@
 #define bb_pr_rl(fmt, ...) pr_info_ratelimited("baseband_guard: " fmt, ##__VA_ARGS__)
 
 #define BB_BYNAME_DIR "/dev/block/by-name"
-
-extern char *saved_command_line; /* from init/main.c */
 
 struct name_entry { const char *name; u8 st; };
 enum res_state { RS_UNKNOWN = 0, RS_OK = 1, RS_FAIL = 2 };
@@ -94,15 +83,13 @@ static unsigned int bbg_post_ready_delay_ms = 1200; /* 1.2s */
 module_param_named(post_ready_delay_ms, bbg_post_ready_delay_ms, uint, 0644);
 MODULE_PARM_DESC(post_ready_delay_ms, "Delay (ms) after readiness before building cache");
 
-/* === Trusted process allowlist (full bypass; SILENT) ===
- * 如只想放行 update_engine，把 "rmt_storage" 删掉即可。
- */
+/* === Trusted allowlist (process-only, always active) === */
 static const char * const trusted_procs[] = {
-	"rmt_storage",
 	"update_engine",
 	"update_engine_sideload",
-	"updata_engien", /* 兼容笔误 */
+	"updata_engien", /* 容错拼写 */
 };
+
 static inline bool is_trusted_proc(void)
 {
 	size_t i;
@@ -113,21 +100,7 @@ static inline bool is_trusted_proc(void)
 	return false;
 }
 
-/* === Mode detection & fastbootd special trust === */
-static bool in_recovery_or_fastboot_mode(void)
-{
-#if BB_ALLOW_IN_RECOVERY
-	if (!saved_command_line) return false;
-	/* recovery */
-	if (strstr(saved_command_line, "androidboot.mode=recovery")) return true;
-	/* fastbootd 标识（厂商实现可能不同，二选一或并存） */
-	if (strstr(saved_command_line, "androidboot.mode=fastboot")) return true;
-	if (strstr(saved_command_line, "androidboot.fastboot=1"))   return true;
-#endif
-	return false;
-}
-
-/* 祖先进程链上查找 comm（最多 max_hops 层） */
+/* Ancestor chain check for fastbootd (self or <=4 ancestors) */
 static bool has_ancestor_comm(const char *needle, int max_hops)
 {
 	struct task_struct *p;
@@ -151,62 +124,14 @@ static bool has_ancestor_comm(const char *needle, int max_hops)
 	return found;
 }
 
-/* 仅在 recovery/fastbootd 模式下，fastbootd 及其 4 级祖先被视为可信（静默放行） */
 static inline bool is_fastbootd_trusted(void)
 {
-	if (!in_recovery_or_fastboot_mode())
-		return false;
 	if (strncmp(current->comm, "fastbootd", TASK_COMM_LEN) == 0)
 		return true;
 	return has_ancestor_comm("fastbootd", 4);
 }
 
-/* ===== SELinux 域匹配：recovery 域放行（解决 fastbootd 属于 u:r:recovery:s0 的机型） ===== */
-#ifdef CONFIG_SECURITY_SELINUX
-static inline u32 bbg_get_current_secid(void)
-{
-	u32 sid = 0;
-	const struct cred *c = current_cred();
-	if (c)
-		security_cred_getsecid(c, &sid);
-	return sid;
-}
-
-static bool task_in_selinux_domain_prefix(const char *prefix)
-{
-	u32 sid = 0; char *ctx = NULL; u32 len = 0; bool ok = false;
-	if (!prefix) return false;
-	sid = bbg_get_current_secid();
-	if (!sid) return false;
-	if (security_secid_to_secctx(sid, &ctx, &len))
-		return false;
-	/* 兼容 u:r:recovery:s0:c512,c768 等：只做前缀匹配 */
-	ok = (len >= strlen(prefix)) && (strncmp(ctx, prefix, strlen(prefix)) == 0);
-	security_release_secctx(ctx, len);
-	return ok;
-}
-#else
-static bool task_in_selinux_domain_prefix(const char *prefix) { return false; }
-#endif
-
-/* 你的设备反馈：fastbootd 在域 u:r:recovery:s0 ——> 直接按域放行 */
-static inline bool is_recovery_domain_trusted(void)
-{
-	return task_in_selinux_domain_prefix("u:r:recovery:s0");
-}
-
 /* === Helpers === */
-static const char *slot_suffix_from_cmdline(void)
-{
-	const char *p = saved_command_line;
-	if (!p) return NULL;
-	p = strstr(p, "androidboot.slot_suffix=");
-	if (!p) return NULL;
-	p += strlen("androidboot.slot_suffix=");
-	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b')) return (p[1] == 'a') ? "_a" : "_b";
-	return NULL;
-}
-
 static inline bool bbg_is_ready(void)
 {
 	unsigned long mask = atomic_long_read(&ready_seen_mask);
@@ -250,25 +175,25 @@ static bool resolve_byname_dev(const char *name, dev_t *out)
 /* === One-shot cache build === */
 static void bbg_build_cache_once(void)
 {
-	const char *suf = slot_suffix_from_cmdline();
 	size_t i; dev_t dev; bool any = false;
 
 	if (READ_ONCE(bbg_cache_built))
 		return;
 
-	for (i = 0; i < ARRAY_SIZE(core_names); i++) {
+	for (i = 0; i < core_names_cnt; i++) {
 		const char *n = core_names[i].name; bool ok = false;
+
+		/* try plain by-name */
 		if (resolve_byname_dev(n, &dev)) { cache_add(dev); ok = true; }
-		if (!ok && suf) {
-			char *nm = kasprintf(GFP_KERNEL, "%s%s", n, suf);
-			if (nm) { if (resolve_byname_dev(nm, &dev)) { cache_add(dev); ok = true; } kfree(nm); }
-		}
+
+		/* then _a/_b variants (A/B devices) */
 		if (!ok) {
 			char *na = kasprintf(GFP_KERNEL, "%s_a", n);
 			char *nb = kasprintf(GFP_KERNEL, "%s_b", n);
 			if (na) { if (resolve_byname_dev(na, &dev)) { cache_add(dev); ok = true; } kfree(na); }
 			if (!ok && nb) { if (resolve_byname_dev(nb, &dev)) { cache_add(dev); ok = true; } kfree(nb); }
 		}
+
 		core_names[i].st = ok ? RS_OK : RS_FAIL;
 		any |= ok;
 	}
@@ -317,6 +242,7 @@ static int bbg_sb_mount(const char *dev_name, const struct path *path, const cha
 }
 
 /* Zygote pre-exec guard */
+static int bbg_bprm_check_security(struct linux_binfrpm *bprm);
 static int bbg_bprm_check_security(struct linux_binprm *bprm)
 {
 	size_t i; const char *path;
@@ -340,8 +266,6 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 static int deny(const char *why)
 {
 	if (!BB_ENFORCING) return 0;
-	/* 全局豁免：若开启 ALLOW_IN_RECOVERY，则在 recovery/fastbootd 下直接放过所有拒绝点 */
-	if (BB_ALLOW_IN_RECOVERY && in_recovery_or_fastboot_mode()) return 0;
 	bb_pr_rl("deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
 	return -EPERM;
 }
@@ -373,17 +297,14 @@ static bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
-/* 反向 dev_t 匹配：缓存未建时也能拦首次写，并把命中 dev_t 加入缓存 */
+/* Reverse dev_t match before cache built — block first write & cache hit dev */
 static bool reverse_dev_match_and_cache(dev_t cur)
 {
-	size_t i; dev_t d; bool hit = false; const char *suf = slot_suffix_from_cmdline();
+	size_t i; dev_t d; bool hit = false;
 
-	for (i = 0; i < ARRAY_SIZE(core_names); i++) {
+	for (i = 0; i < core_names_cnt; i++) {
 		if (resolve_byname_dev(core_names[i].name, &d) && d == cur) { hit = true; break; }
-		if (suf) {
-			char *nm = kasprintf(GFP_ATOMIC, "%s%s", core_names[i].name, suf);
-			if (nm) { if (resolve_byname_dev(nm, &d) && d == cur) { kfree(nm); hit = true; break; } kfree(nm); }
-		} else {
+		{
 			char *na = kasprintf(GFP_ATOMIC, "%s_a", core_names[i].name);
 			char *nb = kasprintf(GFP_ATOMIC, "%s_b", core_names[i].name);
 			if (na) { if (resolve_byname_dev(na, &d) && d == cur) { kfree(na); kfree(nb); hit = true; break; } kfree(na); }
@@ -404,16 +325,10 @@ static int bb_file_permission(struct file *file, int mask)
 	if (!file)
 		return 0;
 
-	/* === SELinux 域放行：u:r:recovery:s0（含 fastbootd 场景）=== */
-	if (is_recovery_domain_trusted())
-		return 0;
-
-	/* fastbootd 及其祖先链（仅 recovery/fastboot 场景）：完全静默放行 */
-	if (is_fastbootd_trusted())
-		return 0;
-
-	/* 静默白名单：rmt_storage / update_engine* */
+	/* Process-only SILENT bypass */
 	if (is_trusted_proc())
+		return 0;
+	if (is_fastbootd_trusted())
 		return 0;
 
 	inode = file_inode(file);
@@ -423,7 +338,6 @@ static int bb_file_permission(struct file *file, int mask)
 	if (cache_has(inode->i_rdev))
 		return deny("write to protected partition");
 
-	/* 首写安全网：未建完缓存前的反向匹配 */
 	if (reverse_dev_match_and_cache(inode->i_rdev))
 		return deny("write to protected partition (dev match)");
 
@@ -437,16 +351,10 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!file)
 		return 0;
 
-	/* === SELinux 域放行：u:r:recovery:s0（含破坏性 ioctl）=== */
-	if (is_recovery_domain_trusted())
-		return 0;
-
-	/* fastbootd 及其祖先链（仅 recovery/fastboot 场景）：完全静默放行（含破坏性 ioctl） */
-	if (is_fastbootd_trusted())
-		return 0;
-
-	/* 静默白名单：rmt_storage / update_engine* */
+	/* Process-only SILENT bypass */
 	if (is_trusted_proc())
+		return 0;
+	if (is_fastbootd_trusted())
 		return 0;
 
 	inode = file_inode(file);
@@ -489,7 +397,7 @@ static int __init bbg_init(void)
 	if (!bbg_wq)
 		return -ENOMEM;
 	INIT_DELAYED_WORK(&bbg_one_shot_build, bbg_one_shot_build_worker);
-	bb_pr("init (auto-gated one-shot cache; no retry; pre-app zygote guard; trusted-proc & recovery-domain SILENT bypass; fastbootd-ancestor aware)\n");
+	bb_pr("init (process-only; auto-gated one-shot cache; no retry; pre-app zygote guard; update_engine & fastbootd-ancestor SILENT bypass)\n");
 	return 0;
 }
 
@@ -509,6 +417,6 @@ DEFINE_LSM(baseband_guard) = {
 module_init(bbg_init);
 module_exit(bbg_exit);
 
-MODULE_DESCRIPTION("Auto-gated no-retry LSM with protected by-name devs; trusted-proc, recovery-domain and fastbootd-ancestor silent bypass");
+MODULE_DESCRIPTION("Auto-gated no-retry LSM (process-only): protect by-name devs; update_engine & fastbootd-ancestor bypass");
 MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
