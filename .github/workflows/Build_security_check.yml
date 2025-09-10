@@ -133,9 +133,6 @@ jobs:
             echo "KERNEL_TIME=$CUSTOM_TIME" >> $GITHUB_ENV
           else
             case "${{ github.event.inputs.REPO_MANIFEST }}" in
-              oneplus_ace5_pro)
-                echo 'KERNEL_TIME=Mon May 12 09:09:59 UTC 2025' >> $GITHUB_ENV
-                ;;
               realme_GT7pro_Speed)
                 echo 'KERNEL_TIME=Tue Dec 17 23:36:49 UTC 2024' >> $GITHUB_ENV
                 ;;
@@ -247,18 +244,18 @@ jobs:
       - name: Patch main.c (cat拼接soc0 serial_number panic校验)
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          # # 防重复 patch
-          # if grep -q 'SOC_SN_CHECK' init/main.c; then
-          #   echo "main.c 已包含 patch, 跳过"
-          #   exit 0
-          # fi
-          # cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
-          # LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
-          # head -n "$LINE" init/main.c > init/main.c.patched
-          # cat serialid_check.c >> init/main.c.patched
-          # tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
-          # mv init/main.c.patched init/main.c
-          # echo "已自动插入 serialid_check.c 到 main.c"
+          # 防重复 patch
+          if grep -q 'SOC_SN_CHECK' init/main.c; then
+            echo "main.c 已包含 patch, 跳过"
+            exit 0
+          fi
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
+          LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
+          head -n "$LINE" init/main.c > init/main.c.patched
+          cat serialid_check.c >> init/main.c.patched
+          tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
+          mv init/main.c.patched init/main.c
+          echo "已自动插入 serialid_check.c 到 main.c"
 
           cp "${GITHUB_WORKSPACE}/BACKUP/baseband_guard.c" ./security/baseband_guard.c
           set -euo pipefail
