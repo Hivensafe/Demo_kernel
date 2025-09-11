@@ -50,6 +50,7 @@
 
 static const char * const allowed_selinux_domains[] = {
 	"u:r:update_engine:s0",
+	"u:r:update_engine_sideload:s0",
 	"u:r:fastbootd:s0",
 	"u:r:recovery:s0",
 	"u:r:vendor_rmt_storage:s0",
