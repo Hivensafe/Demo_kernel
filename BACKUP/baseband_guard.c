@@ -240,7 +240,7 @@ static bool current_domain_allowed(void)
 {
 #ifdef CONFIG_SECURITY_SELINUX
 	u32 sid = 0;
-	const char *ctx = NULL;
+	char *ctx = NULL;
 	u32 len = 0;
 	bool ok = false;
 	size_t i;
@@ -249,7 +249,7 @@ static bool current_domain_allowed(void)
 	if (!sid)
 		return false;
 
-	if (security_secid_to_secctx(sid, (char **)&ctx, &len))
+	if (security_secid_to_secctx(sid,&ctx, &len))
 		return false;
 	if (!ctx || !len)
 		goto out;
