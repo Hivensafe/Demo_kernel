@@ -471,7 +471,7 @@ jobs:
             echo 'CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG=y'
             echo 'CONFIG_SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK=y'
             echo 'CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE=y'
-            echo 'CONFIG_LSM="baseband_guard,capability,landlock,lockdown,yama,bpf"'
+            echo 'CONFIG_LSM="baseband_guard,capability,landlock,lockdown,selinux,yama,bpf"'
           } >> "$DEF"
           
           if [ "$ENABLE_B" = "BBR" ]; then
