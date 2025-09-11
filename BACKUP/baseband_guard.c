@@ -54,6 +54,8 @@ static const char * const allowed_domain_substrings[] = {
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
+	"oplus",
+	"oppo",
 };
 static const size_t allowed_domain_substrings_cnt = ARRAY_SIZE(allowed_domain_substrings);
 
