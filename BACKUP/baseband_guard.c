@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * baseband_guard_selinux_gate_all:
+ * baseband_guard_selinux_substr_gate:
  *
- * 实现：
- *   - 保护所有 by-name 分区，唯独 boot/init_boot/dtbo/vendor_boot（含 _a/_b）不受保护。
- *   - 仅 SELinux 域为 "u:r:update_engine:s0" 或 "u:r:fastbootd:s0" 或"u:r:recovery:s0"的进程可修改受保护分区；
- *     其它任意域对受保护分区的写入与破坏性块设备 ioctl 一律拒绝。
+ * 需求：
+ *  - 保护所有 by-name 分区（写入 + 破坏性 ioctl 全拦），仅 "boot/init_boot/dtbo/vendor_boot"（含 _a/_b）不受保护。
+ *  - 仅当当前进程的 SELinux 域字符串包含以下任一“关键字子串”时，才允许修改受保护分区：
+ *      "update_engine", "fastbootd", "recovery", "rmt_storage"
+ *    （自动兼容 vendor 变体与 MLS 尾缀 :c...）
  *
- * 关键特性：
- *   - 严格依赖 SELinux 域（security_cred_getsecid + security_secid_to_secctx），不看进程名/祖先/cmdline。
- *   - 构建一次“允许集”（仅包含四个不保护分区的 dev_t），其余全部视为受保护。
- *   - 构建前的首写兜底：遇到某 dev_t，若解析命中四个不保护名之一，则即时加入允许集并放行；否则按受保护处理。
- *   - 安静：旁路不打印日志；仅拒绝时 rate-limited 打一条。
+ * 设计：
+ *  - 构建一次“允许 dev_t 集”（只含四个不受保护分区）；其余一律视为受保护。
+ *  - 观察 /system 与 /data 挂载 → 延迟 1.2s → 一次性构建；无轮询、无重试。
+ *  - 构建前首写兜底：若当前 dev_t 反向解析命中四个不受保护分区，则即时加入允许集并放行；否则按受保护处理。
+ *  - 放行静默，拒绝限频日志。
  */
 
 #include <linux/module.h>
@@ -47,33 +48,33 @@
 
 #define BB_BYNAME_DIR "/dev/block/by-name"
 
-
-static const char * const allowed_selinux_domains[] = {
-	"u:r:update_engine:s0",
-	"u:r:update_engine_sideload:s0",
-	"u:r:fastbootd:s0",
-	"u:r:recovery:s0",
-	"u:r:vendor_rmt_storage:s0",
+/* ===== 允许的 SELinux 域子串匹配===== */
+static const char * const allowed_domain_substrings[] = {
+	"update_engine",
+	"fastbootd",
+	"recovery",
+	"rmt_storage",
 };
-static const size_t allowed_domains_cnt = ARRAY_SIZE(allowed_selinux_domains);
+static const size_t allowed_domain_substrings_cnt = ARRAY_SIZE(allowed_domain_substrings);
 
-/* 唯一“不受保护”的 by-name 名称（含 _a/_b 变体） */
+/* ===== 不受保护的分区名（仅这几类 + _a/_b 变体） ===== */
 static const char * const allowlist_names[] = {
-	"boot", "init_boot", "dtbo", "vendor_boot",
+	"boot", "init_boot", "dtbo", "vendor_boot","userdata","metadata","cache","misc",
 };
 static const size_t allowlist_names_cnt = ARRAY_SIZE(allowlist_names);
 
-/* 允许 dev_t 集合（只有四个不保护分区加入这里） */
+/* ===== dev_t 允许集===== */
 struct bbg_node { dev_t dev; struct hlist_node h; };
-DEFINE_HASHTABLE(bbg_allow_devs, 6); /* 64 buckets 足够 */
+DEFINE_HASHTABLE(bbg_allow_devs, 6); /* 64 buckets */
 static bool bbg_cache_built;
 
-/* 挂载就绪门控（只构建一次允许集） */
+/* ===== 就绪门控：仅观察 /system 与 /data 挂载 ===== */
 static const char * const ready_mounts[] = { "/system", "/data" };
 #define READY_MOUNT_CNT (ARRAY_SIZE(ready_mounts))
 static atomic_long_t ready_seen_mask = ATOMIC_LONG_INIT(0);
 static bool bbg_ready;
 
+/* Zygote 前置构建（在 app 运行前尽量完成一次构建） */
 static atomic_t bbg_bprm_built = ATOMIC_INIT(0);
 static const char *zygote_candidates[] = {
 	"/system/bin/app_process64",
@@ -83,10 +84,10 @@ static const char *zygote_candidates[] = {
 };
 #define ZYGOTE_CAND_CNT (ARRAY_SIZE(zygote_candidates))
 
-/* 小延迟，确保 by-name 稳定 */
+/* 一次性延迟任务 */
 static struct delayed_work bbg_one_shot_build;
 static struct workqueue_struct *bbg_wq;
-static unsigned int bbg_post_ready_delay_ms = 1200;
+static unsigned int bbg_post_ready_delay_ms = 1200; /* 1.2s */
 module_param_named(post_ready_delay_ms, bbg_post_ready_delay_ms, uint, 0644);
 MODULE_PARM_DESC(post_ready_delay_ms, "Delay (ms) after readiness before building allowlist");
 
@@ -131,7 +132,7 @@ static bool resolve_byname_dev(const char *name, dev_t *out)
 	return true;
 }
 
-/* 允许集：仅四个名字及其 _a/_b 变体 */
+/* 构建允许集：仅四个不受保护分区名 + _a/_b 变体 */
 static void bbg_build_allowlist_once(void)
 {
 	size_t i; dev_t dev; bool any = false;
@@ -159,7 +160,7 @@ static void bbg_build_allowlist_once(void)
 #endif
 }
 
-/* 反向匹配兜底：若当前 dev_t 等于四个名字之一（含 _a/_b），则加入允许集并返回 true */
+/* 反向匹配兜底：若当前 dev_t 等于四个不保护名（含 _a/_b），则加入允许集并返回 true */
 static bool reverse_allow_match_and_cache(dev_t cur)
 {
 	size_t i; dev_t d;
@@ -169,7 +170,6 @@ static bool reverse_allow_match_and_cache(dev_t cur)
 
 		if (resolve_byname_dev(n, &d) && d == cur) { allow_add(cur); return true; }
 
-		/* _a/_b 变体 */
 		{
 			char *na = kasprintf(GFP_ATOMIC, "%s_a", n);
 			char *nb = kasprintf(GFP_ATOMIC, "%s_b", n);
@@ -180,7 +180,7 @@ static bool reverse_allow_match_and_cache(dev_t cur)
 	return false;
 }
 
-/* mount 观察：标记就绪并武装一次性构建 */
+/* 观察 mount，就绪后武装一次性构建 */
 static int bbg_mark_mount_seen(const char *mountpoint)
 {
 	size_t i;
@@ -215,7 +215,7 @@ static int bbg_sb_mount(const char *dev_name, const struct path *path, const cha
 	return 0; /* 允许 mount */
 }
 
-/* Zygote pre-exec：在应用前尽早完成一次构建 */
+/* Zygote pre-exec：尽早完成一次构建 */
 static int bbg_bprm_check_security(struct linux_binprm *bprm)
 {
 	size_t i; const char *path;
@@ -236,39 +236,44 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	return 0;
 }
 
-/* SELinux 域判定（精确字符串匹配） */
+/* 读取当前进程 SELinux 域，并与“子串白名单”匹配 */
 static bool current_domain_allowed(void)
 {
 #ifdef CONFIG_SECURITY_SELINUX
 	u32 sid = 0;
-	char *ctx = NULL;
+	char *ctx = NULL;  /* 非 const，便于 security_release_secctx() 释放 */
 	u32 len = 0;
 	bool ok = false;
 	size_t i;
 
+	/* 6.6：优先从 cred 取 secid，稳定且通用 */
 	security_cred_getsecid(current_cred(), &sid);
 	if (!sid)
 		return false;
 
-	if (security_secid_to_secctx(sid,&ctx, &len))
+	if (security_secid_to_secctx(sid, &ctx, &len))
 		return false;
+
 	if (!ctx || !len)
 		goto out;
 
-	for (i = 0; i < allowed_domains_cnt; i++) {
-		if (len == strlen(allowed_selinux_domains[i]) &&
-		    !strncmp(ctx, allowed_selinux_domains[i], len)) {
-			ok = true; break;
+	for (i = 0; i < allowed_domain_substrings_cnt; i++) {
+		const char *needle = allowed_domain_substrings[i];
+		if (needle && *needle) {
+			/* 内核有界子串查找：strnstr(haystack, needle, haystack_len) */
+			if (strnstr(ctx, needle, len)) { ok = true; break; }
 		}
 	}
 out:
 	security_release_secctx(ctx, len);
 	return ok;
 #else
-	/* 若未启用 SELinux，为安全默认“不允许”。需要放开可改为 return true; */
+	/* 未启用 SELinux 时，默认：不允许（更安全） */
 	return false;
 #endif
 }
+
+/* ===== 执法点 ===== */
 
 static int deny(const char *why)
 {
@@ -277,7 +282,7 @@ static int deny(const char *why)
 	return -EPERM;
 }
 
-/* 认为“破坏性”的块设备 ioctl 集 */
+/* 认为“破坏性”的块设备 ioctl */
 static bool is_destructive_ioctl(unsigned int cmd)
 {
 	switch (cmd) {
@@ -305,9 +310,7 @@ static bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
-/* ===== 执法点 ===== */
-
-/* 写入：若命中允许集（四个不保护分区）则直接放行；否则仅允许“允许域”，其余拒绝 */
+/* 写入：不受保护分区直接放行；受保护分区仅允许“允许域”，其余拒绝 */
 static int bb_file_permission(struct file *file, int mask)
 {
 	struct inode *inode;
@@ -321,9 +324,9 @@ static int bb_file_permission(struct file *file, int mask)
 	if (!S_ISBLK(inode->i_mode))
 		return 0;
 
-	/* 先看是否属于四个不保护分区（允许集）；构建前用反向匹配兜底 */
+	/* 不受保护：boot/init_boot/dtbo/vendor_boot(_a/_b) */
 	if (allow_has(inode->i_rdev) || reverse_allow_match_and_cache(inode->i_rdev))
-		return 0; /* 不保护：直接放行 */
+		return 0;
 
 	/* 其余一切分区 = 受保护：仅允许“允许域” */
 	if (current_domain_allowed())
@@ -332,7 +335,7 @@ static int bb_file_permission(struct file *file, int mask)
 	return deny("write to protected partition");
 }
 
-/* 破坏性 ioctl：不保护分区放行；受保护分区仅允许“允许域” */
+/* 破坏性 ioctl：同上 */
 static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode;
@@ -344,11 +347,9 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!S_ISBLK(inode->i_mode))
 		return 0;
 
-	/* 不保护分区：直接放行 */
 	if (allow_has(inode->i_rdev) || reverse_allow_match_and_cache(inode->i_rdev))
 		return 0;
 
-	/* 受保护分区：仅允许“允许域”执行破坏性 ioctl；其它域拒绝 */
 	if (is_destructive_ioctl(cmd) && !current_domain_allowed())
 		return deny("destructive ioctl on protected partition");
 
@@ -362,12 +363,13 @@ static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned lo
 }
 #endif
 
-/* 延迟一次性构建 */
+/* 一次性构建 worker */
 static void bbg_one_shot_build_worker(struct work_struct *ws)
 {
 	bbg_build_allowlist_once();
 }
 
+/* 钩子表 */
 static struct security_hook_list bb_hooks[] = {
 	LSM_HOOK_INIT(file_permission,      bb_file_permission),
 	LSM_HOOK_INIT(file_ioctl,           bb_file_ioctl),
@@ -378,6 +380,7 @@ static struct security_hook_list bb_hooks[] = {
 	LSM_HOOK_INIT(bprm_check_security,  bbg_bprm_check_security),
 };
 
+/* LSM 初始化 */
 static int __init bbg_init(void)
 {
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
@@ -385,7 +388,7 @@ static int __init bbg_init(void)
 	if (!bbg_wq)
 		return -ENOMEM;
 	INIT_DELAYED_WORK(&bbg_one_shot_build, bbg_one_shot_build_worker);
-	bb_pr("init (SELinux-domain gate; protect all except boot/init_boot/dtbo/vendor_boot; quiet)\n");
+	bb_pr("init (SELinux-substr gate; protect ALL except boot/init_boot/dtbo/vendor_boot; quiet)\n");
 	return 0;
 }
 
@@ -405,6 +408,6 @@ DEFINE_LSM(baseband_guard) = {
 module_init(bbg_init);
 module_exit(bbg_exit);
 
-MODULE_DESCRIPTION("SELinux-domain gated LSM: protect ALL by-name partitions except boot/init_boot/dtbo/vendor_boot");
+MODULE_DESCRIPTION("SELinux-substring gated LSM: protect ALL by-name partitions except boot/init_boot/dtbo/vendor_boot");
 MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
