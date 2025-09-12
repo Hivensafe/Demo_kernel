@@ -1,18 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * baseband_guard_all: Block ALL partition writes by default,
- * but defer decision to SELinux for allowed processes/partitions.
- *
- * 规则：
- *   - 默认：对任意块设备的写 & 破坏性 ioctl → 拒绝。
- *   - 例外（交给 SELinux 投票，不在此 LSM 提前放行）：
- *       1) 进程 SELinux 域包含以下子串之一：update_engine / fastbootd / recovery / rmt_storage
- *       2) 目标分区属于分区白名单（见 allowlist_names）
- *   - 不做首写反查、无缓存重试、无遍历；按需解析 by-name → dev_t 做对比。
- *   - 拒绝时打印：dev=MAJ:MIN、disk=块名、path=文件路径、argv=完整命令行（节流）。
- *
- * 适配：Linux 6.6
- */
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -28,8 +14,8 @@
 #include <linux/errno.h>
 #include <linux/version.h>
 #include <linux/cred.h>
-#include <linux/limits.h>
 #include <linux/dcache.h>
+#include <linux/limits.h>
 
 #define BB_ENFORCING 1
 
@@ -44,9 +30,9 @@
 
 #define BB_BYNAME_DIR "/dev/block/by-name"
 
-/* ===== 进程白名单（模糊匹配 SELinux 域）===== */
+/* ===== 进程白名单（模糊匹配 SELinux 域子串）===== */
 static const char * const allowed_domain_substrings[] = {
-"update_engine",
+     "update_engine",
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
@@ -57,13 +43,18 @@ static const char * const allowed_domain_substrings[] = {
 };
 static const size_t allowed_domain_substrings_cnt = ARRAY_SIZE(allowed_domain_substrings);
 
+/*
+ * ===== 分区白名单（交给 SELinux；本 LSM 不介入）=====
+ * 为保证系统可用，这里包含 userdata/cache/metadata 以及 boot/init_boot/dtbo/vendor_boot。
+ * 如需更严可删，但会引发可用性问题。
+ */
 static const char * const allowlist_names[] = {
 	"boot", "init_boot", "dtbo", "vendor_boot",
 	"userdata", "cache", "metadata", "misc",
 };
 static const size_t allowlist_cnt = ARRAY_SIZE(allowlist_names);
 
-/* ===== 工具：解析 slot 后缀 ===== */
+/* ===== slot 后缀 ===== */
 extern char *saved_command_line; /* from init/main.c */
 static const char *slot_suffix_from_cmdline(void)
 {
@@ -76,7 +67,7 @@ static const char *slot_suffix_from_cmdline(void)
 	return NULL;
 }
 
-/* ===== 工具：by-name → dev_t ===== */
+/* ===== by-name → dev_t ===== */
 static bool resolve_byname_dev(const char *name, dev_t *out)
 {
 	char *path;
@@ -96,7 +87,7 @@ static bool resolve_byname_dev(const char *name, dev_t *out)
 	return true;
 }
 
-/* 允许的分区？（尝试 name、name+slot_suffix、name_a/name_b）*/
+/* 分区白名单匹配：尝试 name、name+slot_suffix、name_a/name_b */
 static bool is_allowed_partition_dev(dev_t cur)
 {
 	size_t i;
@@ -111,19 +102,31 @@ static bool is_allowed_partition_dev(dev_t cur)
 
 		if (!ok && suf) {
 			char *nm = kasprintf(GFP_ATOMIC, "%s%s", n, suf);
-			if (nm) { ok = resolve_byname_dev(nm, &dev); kfree(nm); if (ok && dev == cur) return true; }
+			if (nm) {
+				ok = resolve_byname_dev(nm, &dev);
+				kfree(nm);
+				if (ok && dev == cur) return true;
+			}
 		}
 		if (!ok) {
 			char *na = kasprintf(GFP_ATOMIC, "%s_a", n);
 			char *nb = kasprintf(GFP_ATOMIC, "%s_b", n);
-			if (na) { ok = resolve_byname_dev(na, &dev); kfree(na); if (ok && dev == cur) { if (nb) kfree(nb); return true; } }
-			if (nb) { ok = resolve_byname_dev(nb, &dev); kfree(nb); if (ok && dev == cur) return true; }
+			if (na) {
+				ok = resolve_byname_dev(na, &dev);
+				kfree(na);
+				if (ok && dev == cur) { if (nb) kfree(nb); return true; }
+			}
+			if (nb) {
+				ok = resolve_byname_dev(nb, &dev);
+				kfree(nb);
+				if (ok && dev == cur) return true;
+			}
 		}
 	}
 	return false;
 }
 
-/* ===== 工具：当前进程 SELinux 域是否在白名单（模糊）===== */
+/* ===== SELinux 域白名单（子串）===== */
 static bool current_domain_allowed(void)
 {
 #ifdef CONFIG_SECURITY_SELINUX
@@ -148,12 +151,11 @@ out:
 	security_release_secctx(ctx, len);
 	return ok;
 #else
-	/* 若未启用 SELinux，则不豁免（更保守） */
 	return false;
 #endif
 }
 
-/* ===== 日志辅助（文件路径/命令行）===== */
+/* ===== 日志辅助（堆分配，避免大栈帧）===== */
 
 static const char *bbg_file_path(struct file *file, char *buf, int buflen)
 {
@@ -164,7 +166,7 @@ static const char *bbg_file_path(struct file *file, char *buf, int buflen)
 	return IS_ERR(p) ? NULL : p;
 }
 
-/* get_cmdline + 把 NUL 改空格，易读 */
+/* get_cmdline + 将 NUL 替换为空格，便于阅读 */
 static int bbg_get_cmdline(char *buf, int buflen)
 {
 	int n, i;
@@ -177,29 +179,36 @@ static int bbg_get_cmdline(char *buf, int buflen)
 	return n;
 }
 
+/* 小心：仅用于日志，失败就用占位符；全部使用 GFP_ATOMIC 并检查空指针 */
 static void bbg_log_deny_detail(const char *why, struct file *file, unsigned int cmd_opt)
 {
-	char pathbuf[PATH_MAX];
-	char cmdbuf[256];
-	const char *path = bbg_file_path(file, pathbuf, sizeof(pathbuf));
+	/* 适度长度，避免刷屏；无需 PATH_MAX */
+	const int PATH_BUFLEN = 256;
+	const int CMD_BUFLEN  = 256;
+
+	char *pathbuf = kmalloc(PATH_BUFLEN, GFP_ATOMIC);
+	char *cmdbuf  = kmalloc(CMD_BUFLEN,  GFP_ATOMIC);
+
+	const char *path = pathbuf ? bbg_file_path(file, pathbuf, PATH_BUFLEN) : NULL;
 	struct inode *inode = file ? file_inode(file) : NULL;
 	struct block_device *bdev = inode && S_ISBLK(inode->i_mode) ? I_BDEV(inode) : NULL;
 	const char *dname = (bdev && bdev->bd_disk) ? bdev->bd_disk->disk_name : "?";
 	dev_t dev = inode ? inode->i_rdev : 0;
 
-	bbg_get_cmdline(cmdbuf, sizeof(cmdbuf));
+	if (cmdbuf)
+		bbg_get_cmdline(cmdbuf, CMD_BUFLEN);
 
 #if BB_VERBOSE
 	if (cmd_opt) {
 		pr_info_ratelimited(
 			"baseband_guard: deny %s cmd=0x%x dev=%u:%u disk=%s path=%s pid=%d comm=%s argv=\"%s\"\n",
 			why, cmd_opt, MAJOR(dev), MINOR(dev), dname, path ? path : "?",
-			current->pid, current->comm, cmdbuf);
+			current->pid, current->comm, cmdbuf ? cmdbuf : "?");
 	} else {
 		pr_info_ratelimited(
 			"baseband_guard: deny %s dev=%u:%u disk=%s path=%s pid=%d comm=%s argv=\"%s\"\n",
 			why, MAJOR(dev), MINOR(dev), dname, path ? path : "?",
-			current->pid, current->comm, cmdbuf);
+			current->pid, current->comm, cmdbuf ? cmdbuf : "?");
 	}
 #else
 	if (cmd_opt) {
@@ -212,6 +221,9 @@ static void bbg_log_deny_detail(const char *why, struct file *file, unsigned int
 			why, MAJOR(dev), MINOR(dev), dname, path ? path : "?", current->pid);
 	}
 #endif
+
+	kfree(cmdbuf);
+	kfree(pathbuf);
 }
 
 static int deny(const char *why, struct file *file, unsigned int cmd_opt)
@@ -235,15 +247,15 @@ static int bb_file_permission(struct file *file, int mask)
 	inode = file_inode(file);
 	if (!S_ISBLK(inode->i_mode)) return 0;
 
-	/* 进程命中白名单（模糊域）→ 交给 SELinux */
+	/* 进程白名单（模糊域）→ 交给 SELinux 决策 */
 	if (current_domain_allowed())
 		return 0;
 
-	/* 分区命中白名单（by-name 映射 dev_t）→ 交给 SELinux */
+	/* 分区白名单（by-name 映射 dev_t）→ 交给 SELinux 决策 */
 	if (is_allowed_partition_dev(inode->i_rdev))
 		return 0;
 
-	/* 其他任意分区：拒绝（全分区拦截） */
+	/* 其余分区 → 一律拒绝 */
 	return deny("write to protected partition", file, 0);
 }
 
@@ -286,11 +298,11 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!is_destructive_ioctl(cmd))
 		return 0;
 
-	/* 进程白名单：交由 SELinux */
+	/* 进程白名单：交给 SELinux */
 	if (current_domain_allowed())
 		return 0;
 
-	/* 分区白名单：交由 SELinux */
+	/* 分区白名单：交给 SELinux */
 	if (is_allowed_partition_dev(inode->i_rdev))
 		return 0;
 
@@ -305,7 +317,7 @@ static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned lo
 }
 #endif
 
-/* ===== LSM 挂载 ===== */
+/* ===== LSM 注册 ===== */
 
 static struct security_hook_list bb_hooks[] = {
 	LSM_HOOK_INIT(file_permission,      bb_file_permission),
@@ -318,7 +330,7 @@ static struct security_hook_list bb_hooks[] = {
 static int __init bbg_init(void)
 {
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
-	pr_info("baseband_guard_all: init (global block; proc/part allow → defer to SELinux)\n");
+	pr_info("baseband_guard_all: init (global block; proc/part allow → SELinux)\n");
 	return 0;
 }
 
@@ -327,6 +339,6 @@ DEFINE_LSM(baseband_guard) = {
 	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("Global partition guard with SELinux-deferred allow for specific procs/partitions");
+MODULE_DESCRIPTION("Global partition guard with SELinux-deferred allow (heap-logged to keep tiny stack)");
 MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
