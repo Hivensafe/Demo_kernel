@@ -1,4 +1,4 @@
-name: Build_security_check
+name: Build_serialID_check
 on:
   workflow_dispatch:
     inputs:
@@ -374,16 +374,6 @@ jobs:
           echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          DEF=./common/arch/arm64/configs/gki_defconfig
-          {
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD=y'
-            echo 'CONFIG_SECURITYFS=y'
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY=y'
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG=y'
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK=y'
-            echo 'CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE=y'
-            echo 'CONFIG_LSM="baseband_guard,capability,landlock,lockdown,selinux,yama,bpf"'
-          } >> "$DEF"
           
           if [ "$ENABLE_B" = "BBR" ]; then
             echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
