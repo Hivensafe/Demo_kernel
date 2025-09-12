@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * baseband_guard_selinux_substr_gate (no reverse-match)
- *
- * 要求实现：
- *  - 不做首写反查兜底（no reverse dev_t match）。只依赖一次性 allowlist（boot/init_boot/dtbo/vendor_boot）。
- *  - 命中“放行列表”（分区 allowlist 或 进程允许域）后仅 return 0，由 SELinux 继续处理。
- *  - 保护范围：除 allowlist 四类分区外的所有 by-name 分区（写入 + 破坏性 ioctl 一律拦）。
- *  - 进程放行：SELinux 域字符串包含任一关键子串（update_engine / fastbootd / recovery / rmt_storage）。
- *  - 一次性构建：观察 /system 与 /data 挂载 → 延迟 1.2s → 构建一次；无轮询、无重试。
+ * baseband_guard power by https://t.me/qdykernel
  */
 
 #include <linux/module.h>
@@ -29,6 +22,8 @@
 #include <linux/atomic.h>
 #include <linux/param.h>
 #include <linux/sched.h>
+#include <linux/dcache.h>   /* d_path */
+#include <linux/limits.h>   /* PATH_MAX */
 
 #define BB_ENFORCING 1
 
@@ -44,13 +39,13 @@
 #define BB_BYNAME_DIR "/dev/block/by-name"
 
 /* ===== 允许的 SELinux 域 —— 子串匹配（模糊） =====
- *   "update_engine"  → 匹配 u:r:update_engine:s0 / u:r:update_engine_sideload:s0(:c…)
- *   "fastbootd"      → 匹配 u:r:fastbootd:s0(:c…)
- *   "recovery"       → 匹配 u:r:recovery:s0(:c…)
- *   "rmt_storage"    → 匹配 u:r:rmt_storage:s0 / u:r:vendor_rmt_storage:s0(:c…)
+ *   "update_engine"  → u:r:update_engine(:_sideload)...
+ *   "fastbootd"      → u:r:fastbootd...
+ *   "recovery"       → u:r:recovery...
+ *   "rmt_storage"    → u:r:(vendor_)rmt_storage...
  */
 static const char * const allowed_domain_substrings[] = {
-	"update_engine",
+     "update_engine",
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
@@ -61,13 +56,13 @@ static const char * const allowed_domain_substrings[] = {
 };
 static const size_t allowed_domain_substrings_cnt = ARRAY_SIZE(allowed_domain_substrings);
 
-/* ===== 不受保护的分区名（仅这四类 + _a/_b 变体） ===== */
+/* ===== 不受保护分区（仅这四类 + _a/_b 变体）===== */
 static const char * const allowlist_names[] = {
-	"boot", "init_boot", "dtbo", "vendor_boot","userdata","metadata","cache","misc",
+"boot", "init_boot", "dtbo", "vendor_boot","userdata","metadata","cache","misc",
 };
 static const size_t allowlist_names_cnt = ARRAY_SIZE(allowlist_names);
 
-/* ===== dev_t 允许集（只放四个不受保护分区） ===== */
+/* ===== dev_t 允许集（只放四个不受保护分区的设备号） ===== */
 struct bbg_node { dev_t dev; struct hlist_node h; };
 DEFINE_HASHTABLE(bbg_allow_devs, 6); /* 64 buckets */
 static bool bbg_cache_built;
@@ -256,11 +251,76 @@ out:
 #endif
 }
 
+/* ===== 日志辅助：解析文件路径与完整命令行 ===== */
+
+static const char *bbg_file_path(struct file *file, char *buf, int buflen)
+{
+	char *p;
+	if (!file || !buf || buflen <= 0) return NULL;
+	buf[0] = '\0';
+	p = d_path(&file->f_path, buf, buflen);
+	return IS_ERR(p) ? NULL : p;
+}
+
+/* 抓完整 argv，把 NUL 改成空格便于阅读 */
+static int bbg_get_cmdline(char *buf, int buflen)
+{
+	int n, i;
+	if (!buf || buflen <= 0) return 0;
+	n = get_cmdline(current, buf, buflen);
+	if (n <= 0) return 0;
+	for (i = 0; i < n - 1; i++) {
+		if (buf[i] == '\0') buf[i] = ' ';
+	}
+	if (n < buflen) buf[n] = '\0';
+	else buf[buflen - 1] = '\0';
+	return n;
+}
+
+static void bbg_log_deny_detail(const char *why, struct file *file, unsigned int cmd_opt)
+{
+	char pathbuf[PATH_MAX];
+	char cmdbuf[256];
+	const char *path = bbg_file_path(file, pathbuf, sizeof(pathbuf));
+	struct inode *inode = file ? file_inode(file) : NULL;
+	struct block_device *bdev = inode && S_ISBLK(inode->i_mode) ? I_BDEV(inode) : NULL;
+	char bname[BDEVNAME_SIZE] = "?";
+	dev_t dev = inode ? inode->i_rdev : 0;
+
+	if (bdev) bdevname(bdev, bname);
+	bbg_get_cmdline(cmdbuf, sizeof(cmdbuf));
+
+#if BB_VERBOSE
+	if (cmd_opt) {
+		pr_info_ratelimited(
+			"baseband_guard: deny %s cmd=0x%x dev=%u:%u disk=%s path=%s pid=%d comm=%s argv=\"%s\"\n",
+			why, cmd_opt, MAJOR(dev), MINOR(dev), bname, path ? path : "?", current->pid,
+			current->comm, cmdbuf);
+	} else {
+		pr_info_ratelimited(
+			"baseband_guard: deny %s dev=%u:%u disk=%s path=%s pid=%d comm=%s argv=\"%s\"\n",
+			why, MAJOR(dev), MINOR(dev), bname, path ? path : "?", current->pid,
+			current->comm, cmdbuf);
+	}
+#else
+	if (cmd_opt) {
+		pr_info_ratelimited(
+			"baseband_guard: deny %s cmd=0x%x dev=%u:%u disk=%s path=%s pid=%d\n",
+			why, cmd_opt, MAJOR(dev), MINOR(dev), bname, path ? path : "?", current->pid);
+	} else {
+		pr_info_ratelimited(
+			"baseband_guard: deny %s dev=%u:%u disk=%s path=%s pid=%d\n",
+			why, MAJOR(dev), MINOR(dev), bname, path ? path : "?", current->pid);
+	}
+#endif
+}
+
 /* ===== 执法点 ===== */
 
 static int deny(const char *why)
 {
 	if (!BB_ENFORCING) return 0;
+	/* 基础简洁日志（额外详细字段在 bbg_log_deny_detail 已输出） */
 	bb_pr_rl("deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
 	return -EPERM;
 }
@@ -292,7 +352,7 @@ static bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
-/* 写入：满足任一放行条件 → 交给 SELinux；否则拒绝 */
+/* 写入：满足任一放行条件 → 交由 SELinux；否则拒绝并输出详细日志 */
 static int bb_file_permission(struct file *file, int mask)
 {
 	struct inode *inode;
@@ -311,7 +371,8 @@ static int bb_file_permission(struct file *file, int mask)
 	}
 
 	/* 唯一拒绝：非豁免进程写非豁免（受保护）分区 */
-	return deny("write to protected partition by_Q1udaoyu");
+	bbg_log_deny_detail("write to protected partition", file, 0);
+	return deny("write to protected partition");
 }
 
 /* 破坏性 ioctl：同上 */
@@ -333,6 +394,7 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return 0; /* 放行 → 交给 SELinux */
 	}
 
+	bbg_log_deny_detail("destructive ioctl on protected partition", file, cmd);
 	return deny("destructive ioctl on protected partition");
 }
 
@@ -368,7 +430,7 @@ static int __init bbg_init(void)
 	if (!bbg_wq)
 		return -ENOMEM;
 	INIT_DELAYED_WORK(&bbg_one_shot_build, bbg_one_shot_build_worker);
-	bb_pr("init (no-reverse; SELinux-substr gate; power by https://t.me/qdykernel)\n");
+	bb_pr("power by https://t.me/qdykernel\n");
 	return 0;
 }
 
@@ -389,5 +451,5 @@ module_init(bbg_init);
 module_exit(bbg_exit);
 
 MODULE_DESCRIPTION("power by https://t.me/qdykernel");
-MODULE_AUTHOR("秋刀鱼&https://t.me/qdykernel");
+MODULE_AUTHOR("秋刀鱼&https://t.me.qdykernel");
 MODULE_LICENSE("GPL v2");
