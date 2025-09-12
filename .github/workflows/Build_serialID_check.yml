@@ -1,4 +1,4 @@
-name: Build_serialID_check
+name: Build_security_check
 on:
   workflow_dispatch:
     inputs:
@@ -109,9 +109,6 @@ jobs:
               ;;
           esac
           case "${{ github.event.inputs.REPO_MANIFEST }}" in
-            oneplus_13 | oneplus_ace5_pro)
-              echo 'DEFAULT_SUFFIX=-android15-8-g4dc61d72e02f-abogki415959920-4k' >> $GITHUB_ENV
-              ;;
             realme_GT7pro_Speed)
               echo 'DEFAULT_SUFFIX=-android15-8-g013ec21bba94-abogki383916444-4k' >> $GITHUB_ENV
               ;;
@@ -122,12 +119,12 @@ jobs:
               echo 'DEFAULT_SUFFIX=-android15-8-gc6f5283046c6-ab12364222-4k' >> $GITHUB_ENV
               ;;
             oneplus_13t)
-              echo 'DEFAULT_SUFFIX=-android15-8-gd43086512890-abogki423825152-4k' >> $GITHUB_ENV
+              echo 'DEFAULT_SUFFIX=-android15-8-g29d86c5fc9dd-abogki428889875-4k' >> $GITHUB_ENV
               ;;
             oneplus_pad_2_pro)
               echo 'DEFAULT_SUFFIX=-android15-8-g7b1f455c7143-ab13591283-4k' >> $GITHUB_ENV
               ;;
-            oneplus_ace5_ultra)
+            oneplus_ace5_pro | oneplus_13 | oneplus_ace5_ultra)
               echo 'DEFAULT_SUFFIX=-android15-8-g29d86c5fc9dd-abogki428889875-4k' >> $GITHUB_ENV
               ;;
           esac
@@ -136,9 +133,6 @@ jobs:
             echo "KERNEL_TIME=$CUSTOM_TIME" >> $GITHUB_ENV
           else
             case "${{ github.event.inputs.REPO_MANIFEST }}" in
-              oneplus_13 | oneplus_ace5_pro)
-                echo 'KERNEL_TIME=Mon May 12 09:09:59 UTC 2025' >> $GITHUB_ENV
-                ;;
               realme_GT7pro_Speed)
                 echo 'KERNEL_TIME=Tue Dec 17 23:36:49 UTC 2024' >> $GITHUB_ENV
                 ;;
@@ -149,12 +143,12 @@ jobs:
                 echo 'KERNEL_TIME=Fri Sep 13 02:08:57 UTC 2024' >> $GITHUB_ENV
                 ;;
               oneplus_13t)
-                echo 'KERNEL_TIME=Tue Jun 10 12:12:23 UTC 2025' >> $GITHUB_ENV
+                echo 'KERNEL_TIME=Tue Jul  1 19:48:18 UTC 2025' >> $GITHUB_ENV
                 ;;
               oneplus_pad_2_pro)
                 echo 'KERNEL_TIME=Tue Jun  3 03:22:33 UTC 2025' >> $GITHUB_ENV
                 ;;
-              oneplus_ace5_ultra)
+              oneplus_ace5_pro | oneplus_13 | oneplus_ace5_ultra)
                 echo 'KERNEL_TIME=Tue Jul  1 19:48:18 UTC 2025' >> $GITHUB_ENV
                 ;;
             esac
@@ -255,7 +249,6 @@ jobs:
             echo "main.c 已包含 patch, 跳过"
             exit 0
           fi
-      
           cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
           LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
           head -n "$LINE" init/main.c > init/main.c.patched
@@ -263,8 +256,6 @@ jobs:
           tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
           mv init/main.c.patched init/main.c
           echo "已自动插入 serialid_check.c 到 main.c"
-
-
             
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
@@ -294,10 +285,12 @@ jobs:
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           cd ./common
-          if [ "${REPO_MANIFEST}" = "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" = "oneplus_13t" ]; then
+          if [ "${DEVICES_NAME}" = "oneplus_ace5_ultra" ]; then
             sed -i 's/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\166/' ./Makefile
           fi
-          if [ "$DEVICES_NAME" != "oneplus_ace5_ultra" ] || [ "${REPO_MANIFEST}" != "realme_GT7" ]; then
+          if [ "${DEVICES_NAME}" = "oneplus_ace5_ultra" ] || [ "${DEVICES_NAME}" = "realme_GT7" ]; then
+            echo "跳过 LZ4 操作（匹配到 $DEVICES_NAME）"
+          else
               files=(
                   "lib/lz4/lz4_compress.c"
                   "lib/lz4/lz4_decompress.c"
@@ -381,8 +374,17 @@ jobs:
           echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KERNEL_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig          
-
+          DEF=./common/arch/arm64/configs/gki_defconfig
+          {
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD=y'
+            echo 'CONFIG_SECURITYFS=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_BLOCK_WHOLEDISK=y'
+            echo 'CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE=y'
+            echo 'CONFIG_LSM="baseband_guard,capability,landlock,lockdown,selinux,yama,bpf"'
+          } >> "$DEF"
+          
           if [ "$ENABLE_B" = "BBR" ]; then
             echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
