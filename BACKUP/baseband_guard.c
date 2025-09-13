@@ -37,6 +37,10 @@ static const char * const allowed_domain_substrings[] __ro_after_init = {
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
+	"oplus",
+	"oppo",
+	"feature",
+	"swap",
 };
 /* const 对象不要加 __read_mostly，避免段冲突 */
 static const size_t allowed_domain_substrings_cnt =
