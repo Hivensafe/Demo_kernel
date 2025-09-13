@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * baseband_guard_all: Block ALL partition writes by default,
- * but defer decision to SELinux for allowed processes/partitions.
+ * baseband_guard_perf: Global partition guard with minimal CPU overhead.
  *
- * - 默认：写块设备 & 破坏性 ioctl → 拒绝（EPERM）
+ * - 默认：写块设备 & 破坏性 ioctl → 拒绝（-EPERM）
  * - 例外（本 LSM 不提前放行，交由 SELinux 裁决 = return 0）：
- *     1) 当前进程 SELinux 域包含子串：update_engine / fastbootd / recovery / rmt_storage
- *     2) 目标分区在白名单（支持 slot 后缀 a/b），并带“首写反查 dev_t→缓存”
+ *     1) 进程 SELinux 域包含子串：update_engine / fastbootd / recovery / rmt_storage
+ *     2) 分区在 allowlist（含 a/b/slot 后缀），并带“首写反查 dev_t→缓存”
  *
- * - 无主动扫描/轮询；拒绝日志使用 ratelimit；日志缓冲 heap 化避免大栈帧。
- * - 去掉日志中的 disk=... 字段，避免乱码。
- * - 适配 Linux 6.6
+ * - 性能优化：
+ *     * allowed_devs：命中允许分区后缓存 dev_t（O(1)）
+ *     * denied_seen ：未命中允许分区的 dev_t 记录一次（O(1)），避免重复反查
+ *     * SID 快速缓存：同一进程域复用判断结果
+ *
+ * - 日志：ratelimited，去掉 disk= 字段；堆缓冲避免大栈帧。
+ * - 适配 Linux 6.6 API
  */
 
 #include <linux/module.h>
@@ -45,21 +48,17 @@
 
 /* ===== 进程白名单（模糊匹配 SELinux 域子串）===== */
 static const char * const allowed_domain_substrings[] = {
-     "update_engine",
+	"update_engine",
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
-	"oplus",
-	"oppo",
-	"feature",
-	"swap",
 };
 static const size_t allowed_domain_substrings_cnt = ARRAY_SIZE(allowed_domain_substrings);
 
 /*
  * ===== 分区白名单（交给 SELinux；本 LSM 不介入最终许可）=====
- * 为保证系统可用，这里包含 userdata/cache/metadata 以及 boot/init_boot/dtbo/vendor_boot/misc。
- * 如需更严可删，但会引发可用性问题。
+ * 为保证系统可用，这里包含 userdata/cache/metadata/misc + 引导类。
+ * 如需更严可删，但可能影响可用性。
  */
 static const char * const allowlist_names[] = {
 	"boot", "init_boot", "dtbo", "vendor_boot",
@@ -125,6 +124,28 @@ static void allow_add(dev_t dev)
 #endif
 }
 
+/* ===== dev_t 否定缓存：未命中允许分区，仅记录一次，避免重复反查 ===== */
+struct seen_node { dev_t dev; struct hlist_node h; };
+DEFINE_HASHTABLE(denied_seen, 7); /* 128 桶 */
+
+static bool denied_seen_has(dev_t dev)
+{
+	struct seen_node *p;
+	hash_for_each_possible(denied_seen, p, h, (u64)dev)
+		if (p->dev == dev) return true;
+	return false;
+}
+
+static void denied_seen_add(dev_t dev)
+{
+	struct seen_node *n;
+	if (!dev || denied_seen_has(dev)) return;
+	n = kmalloc(sizeof(*n), GFP_ATOMIC);
+	if (!n) return;
+	n->dev = dev;
+	hash_add(denied_seen, &n->h, (u64)dev);
+}
+
 /* ===== 白名单匹配：直接解析（每次）===== */
 static bool is_allowed_partition_dev_resolve(dev_t cur)
 {
@@ -164,7 +185,7 @@ static bool is_allowed_partition_dev_resolve(dev_t cur)
 	return false;
 }
 
-/* ===== 首写反查兜底：当前 dev_t ←→ 白名单 by-name；命中则缓存 ===== */
+/* ===== 首写反查兜底：当前 dev_t ←→ 允许分区 by-name；命中则缓存 ===== */
 static bool reverse_allow_match_and_cache(dev_t cur)
 {
 	if (!cur) return false;
@@ -172,36 +193,42 @@ static bool reverse_allow_match_and_cache(dev_t cur)
 	return false;
 }
 
-/* ===== SELinux 域白名单（子串）===== */
-static bool current_domain_allowed(void)
+/* ===== SELinux 域白名单（子串） + SID 快速缓存 ===== */
+#ifdef CONFIG_SECURITY_SELINUX
+static u32 sid_cache_last;
+static bool sid_cache_last_ok;
+#endif
+
+static bool current_domain_allowed_fast(void)
 {
 #ifdef CONFIG_SECURITY_SELINUX
 	u32 sid = 0;
-	char *ctx = NULL;  /* 非 const，便于释放 */
-	u32 len = 0;
 	bool ok = false;
 	size_t i;
+	char *ctx = NULL;
+	u32 len = 0;
 
 	security_cred_getsecid(current_cred(), &sid);
-	if (!sid) return false;
-	if (security_secid_to_secctx(sid, &ctx, &len)) return false;
-	if (!ctx || !len) goto out;
+	if (sid && sid == sid_cache_last)
+		return sid_cache_last_ok;
 
-	for (i = 0; i < allowed_domain_substrings_cnt; i++) {
-		const char *needle = allowed_domain_substrings[i];
-		if (needle && *needle) {
-			if (strnstr(ctx, needle, len)) { ok = true; break; }
+	if (sid && !security_secid_to_secctx(sid, &ctx, &len) && ctx && len) {
+		for (i = 0; i < allowed_domain_substrings_cnt; i++) {
+			const char *needle = allowed_domain_substrings[i];
+			if (needle && *needle && strnstr(ctx, needle, len)) { ok = true; break; }
 		}
 	}
-out:
 	security_release_secctx(ctx, len);
+
+	sid_cache_last = sid;
+	sid_cache_last_ok = ok;
 	return ok;
 #else
 	return false;
 #endif
 }
 
-/* ===== 日志（heap 缓冲，避免大栈帧；去掉 disk=）===== */
+/* ===== 日志（去掉 disk=；小堆缓冲；ratelimit）===== */
 
 static const char *bbg_file_path(struct file *file, char *buf, int buflen)
 {
@@ -236,8 +263,7 @@ static void bbg_log_deny_detail(const char *why, struct file *file, unsigned int
 	struct inode *inode = file ? file_inode(file) : NULL;
 	dev_t dev = inode ? inode->i_rdev : 0;
 
-	if (cmdbuf)
-		bbg_get_cmdline(cmdbuf, CMD_BUFLEN);
+	if (cmdbuf) bbg_get_cmdline(cmdbuf, CMD_BUFLEN);
 
 #if BB_VERBOSE
 	if (cmd_opt) {
@@ -285,6 +311,7 @@ static int deny(const char *why, struct file *file, unsigned int cmd_opt)
 static int bb_file_permission(struct file *file, int mask)
 {
 	struct inode *inode;
+	dev_t rdev;
 
 	if (!(mask & MAY_WRITE)) return 0;
 	if (!file) return 0;
@@ -292,15 +319,24 @@ static int bb_file_permission(struct file *file, int mask)
 	inode = file_inode(file);
 	if (!S_ISBLK(inode->i_mode)) return 0;
 
-	/* 进程白名单（模糊域）→ 交给 SELinux 决策 */
-	if (current_domain_allowed())
+	rdev = inode->i_rdev;
+
+	/* 进程白名单（SELinux 域子串）：交由 SELinux 裁决 */
+	if (current_domain_allowed_fast())
 		return 0;
 
-	/* 分区白名单（缓存或首写反查）→ 交给 SELinux 决策 */
-	if (allow_has(inode->i_rdev) || reverse_allow_match_and_cache(inode->i_rdev))
+	/* 分区白名单：允许 dev_t 命中缓存 → 交由 SELinux 裁决 */
+	if (allow_has(rdev))
 		return 0;
 
-	/* 其余分区 → 一律拒绝 */
+	/* 对“没见过的 dev_t”且未在否定缓存里，做一次首写反查；命中则缓存并交给 SELinux */
+	if (!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev))
+		return 0;
+
+	/* 反查失败 → 记入否定缓存，后续不再反查 */
+	denied_seen_add(rdev);
+
+	/* 其余：默认拒绝 */
 	return deny("write to protected partition", file, 0);
 }
 
@@ -335,6 +371,7 @@ static bool is_destructive_ioctl(unsigned int cmd)
 static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode;
+	dev_t rdev;
 
 	if (!file) return 0;
 	inode = file_inode(file);
@@ -343,15 +380,19 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!is_destructive_ioctl(cmd))
 		return 0;
 
-	/* 进程白名单：交给 SELinux */
-	if (current_domain_allowed())
+	rdev = inode->i_rdev;
+
+	if (current_domain_allowed_fast())
 		return 0;
 
-	/* 分区白名单（缓存或首写反查）：交给 SELinux */
-	if (allow_has(inode->i_rdev) || reverse_allow_match_and_cache(inode->i_rdev))
+	if (allow_has(rdev))
 		return 0;
 
-	/* 其他任意分区：拒绝 */
+	if (!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev))
+		return 0;
+
+	denied_seen_add(rdev);
+
 	return deny("destructive ioctl on protected partition", file, cmd);
 }
 
@@ -375,7 +416,7 @@ static struct security_hook_list bb_hooks[] = {
 static int __init bbg_init(void)
 {
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
-	pr_info("baseband_guard_all: init (global block; proc/part allow with first-hit dev_t cache → SELinux)\n");
+	pr_info("baseband_guard_perf: init (global block; dev_t allow/deny caches; SID cache; defer to SELinux on allow)\n");
 	return 0;
 }
 
@@ -384,6 +425,6 @@ DEFINE_LSM(baseband_guard) = {
 	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("Global partition guard with SELinux-deferred allow and first-hit dev_t allow cache (no disk field in logs)");
+MODULE_DESCRIPTION("Global partition guard with dev_t allow/deny caches and SELinux-deferred allow (no disk field in logs)");
 MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
