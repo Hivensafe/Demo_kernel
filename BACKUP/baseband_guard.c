@@ -32,29 +32,31 @@
 #define BB_BYNAME_DIR "/dev/block/by-name"
 
 /* ===== Process SELinux domain whitelist (substring match) ===== */
-static const char * const allowed_domain_substrings[] = {
-     "update_engine",
+static const char * const allowed_domain_substrings[] __ro_after_init = {
+	"update_engine",
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
-	"oplus",
-	"oppo",
-	"feature",
-	"swap",
 };
-static const size_t allowed_domain_substrings_cnt __read_mostly =
+/* const 对象不要加 __read_mostly，避免段冲突 */
+static const size_t allowed_domain_substrings_cnt =
 	ARRAY_SIZE(allowed_domain_substrings);
 
-
+/* ===== Partition allowlist (defer to SELinux if matched) =====
+ * Keep system usability: userdata/cache/metadata/misc are included.
+ * Boot-related: boot/init_boot/dtbo/vendor_boot are naturally allowed.
+ */
 static const char * const allowlist_names[] __ro_after_init = {
 	"boot", "init_boot", "dtbo", "vendor_boot",
 	"userdata", "cache", "metadata", "misc",
 };
-static const size_t allowlist_cnt __read_mostly = ARRAY_SIZE(allowlist_names);
+/* const 对象不要加 __read_mostly */
+static const size_t allowlist_cnt = ARRAY_SIZE(allowlist_names);
 
 /* ===== Slot suffix (computed once) ===== */
 extern char *saved_command_line; /* from init/main.c */
-static const char *bbg_slot_suffix __read_mostly;
+/* 指针本质可写，但为避免与上面 const 对象产生段属性牵连，这里不加 __read_mostly */
+static const char *bbg_slot_suffix;
 
 static const char *slot_suffix_from_cmdline_once(void)
 {
@@ -206,7 +208,6 @@ static __always_inline bool current_domain_allowed_fast(void)
 			if (needle && *needle && strnstr(ctx, needle, len)) { ok = true; break; }
 		}
 	}
-	/* security_release_secctx expects (char *) */
 	if (ctx) security_release_secctx((char *)ctx, len);
 
 	sid_cache_last = sid;
@@ -415,6 +416,7 @@ static int __init bbg_init(void)
 {
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
 
+	/* compute slot suffix once */
 	bbg_slot_suffix = slot_suffix_from_cmdline_once();
 
 	bbg_boot_jiffies = jiffies;
