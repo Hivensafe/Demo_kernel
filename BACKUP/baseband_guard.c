@@ -48,10 +48,14 @@
 
 /* ===== 进程白名单（模糊匹配 SELinux 域子串）===== */
 static const char * const allowed_domain_substrings[] = {
-	"update_engine",
+  "update_engine",
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
+	"oplus",
+	"oppo",
+	"feature",
+	"swap",
 };
 static const size_t allowed_domain_substrings_cnt = ARRAY_SIZE(allowed_domain_substrings);
 
