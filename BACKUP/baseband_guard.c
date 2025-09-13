@@ -1,25 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * baseband_guard_perf: Global partition guard with minimal CPU overhead.
- *
- * 策略：
- * - 默认对所有块设备写与破坏性 ioctl 拦截（-EPERM）。
- * - 命中“进程域子串白名单”或“分区白名单（含 a/b/slot 后缀）”时，
- *   本 LSM 不提前放行，return 0 交由 SELinux 裁决（避免 neverallow 争议）。
- *
- * 性能优化：
- * - allowed_devs：命中允许分区后缓存 dev_t，后续 O(1)。
- * - denied_seen ：未命中允许分区的 dev_t 做一次反查后加入，后续不再反查。
- * - SID 快速缓存：同一进程域复用判断结果，减少 secctx 字符串处理。
- *
- * 日志：
- * - 仅单行 ratelimited 拒绝日志（只打印 argv）。
- * - 启动静默窗口（前 quiet_boot_ms 毫秒不打日志，仅拦截）。
- * - 每个 dev_t 最多打印 per_dev_log_limit 次拒绝日志。
- *
- * 兼容：Linux 6.6
- */
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/security.h>
@@ -53,9 +31,9 @@
 
 #define BB_BYNAME_DIR "/dev/block/by-name"
 
-
+/* ===== Process SELinux domain whitelist (substring match) ===== */
 static const char * const allowed_domain_substrings[] = {
-    "update_engine",
+     "update_engine",
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
@@ -64,33 +42,34 @@ static const char * const allowed_domain_substrings[] = {
 	"feature",
 	"swap",
 };
-static const size_t allowed_domain_substrings_cnt = ARRAY_SIZE(allowed_domain_substrings);
+static const size_t allowed_domain_substrings_cnt __read_mostly =
+	ARRAY_SIZE(allowed_domain_substrings);
 
-/*
- * ===== 分区白名单（命中则“交给 SELinux 决定”，本 LSM 不提前放行） =====
- * 注意：包含 userdata/cache/metadata/misc 以保证系统可用；如需更严可调整。
- */
-static const char * const allowlist_names[] = {
+
+static const char * const allowlist_names[] __ro_after_init = {
 	"boot", "init_boot", "dtbo", "vendor_boot",
 	"userdata", "cache", "metadata", "misc",
 };
-static const size_t allowlist_cnt = ARRAY_SIZE(allowlist_names);
+static const size_t allowlist_cnt __read_mostly = ARRAY_SIZE(allowlist_names);
 
-/* ===== slot 后缀解析 ===== */
+/* ===== Slot suffix (computed once) ===== */
 extern char *saved_command_line; /* from init/main.c */
-static const char *slot_suffix_from_cmdline(void)
+static const char *bbg_slot_suffix __read_mostly;
+
+static const char *slot_suffix_from_cmdline_once(void)
 {
 	const char *p = saved_command_line;
 	if (!p) return NULL;
 	p = strstr(p, "androidboot.slot_suffix=");
 	if (!p) return NULL;
 	p += strlen("androidboot.slot_suffix=");
-	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b')) return (p[1] == 'a') ? "_a" : "_b";
+	if (p[0] == '_' && (p[1] == 'a' || p[1] == 'b'))
+		return (p[1] == 'a') ? "_a" : "_b";
 	return NULL;
 }
 
-/* ===== by-name → dev_t 解析 ===== */
-static bool resolve_byname_dev(const char *name, dev_t *out)
+/* ===== by-name → dev_t ===== */
+static __always_inline bool resolve_byname_dev(const char *name, dev_t *out)
 {
 	char *path;
 	dev_t dev;
@@ -98,7 +77,7 @@ static bool resolve_byname_dev(const char *name, dev_t *out)
 
 	if (!name || !out) return false;
 
-	path = kasprintf(GFP_KERNEL, "%s/%s", BB_BYNAME_DIR, name);
+	path = kasprintf(GFP_ATOMIC, "%s/%s", BB_BYNAME_DIR, name);
 	if (!path) return false;
 
 	ret = lookup_bdev(path, &dev);
@@ -109,11 +88,11 @@ static bool resolve_byname_dev(const char *name, dev_t *out)
 	return true;
 }
 
-/* ===== 允许 dev_t 缓存（命中 allowlist 后加入） ===== */
+/* ===== Allowed dev_t cache ===== */
 struct allow_node { dev_t dev; struct hlist_node h; };
-DEFINE_HASHTABLE(allowed_devs, 7); /* 128 桶 */
+DEFINE_HASHTABLE(allowed_devs, 8); /* 256 buckets */
 
-static bool allow_has(dev_t dev)
+static __always_inline bool allow_has(dev_t dev)
 {
 	struct allow_node *p;
 	hash_for_each_possible(allowed_devs, p, h, (u64)dev)
@@ -121,7 +100,7 @@ static bool allow_has(dev_t dev)
 	return false;
 }
 
-static void allow_add(dev_t dev)
+static __always_inline void allow_add(dev_t dev)
 {
 	struct allow_node *n;
 	if (!dev || allow_has(dev)) return;
@@ -134,11 +113,11 @@ static void allow_add(dev_t dev)
 #endif
 }
 
-/* ===== dev_t 否定缓存：未命中 allowlist 的只记一次，后续不再反查 ===== */
+/* ===== Deny-seen dev_t cache (avoid repeated reverse lookups) ===== */
 struct seen_node { dev_t dev; struct hlist_node h; };
-DEFINE_HASHTABLE(denied_seen, 7); /* 128 桶 */
+DEFINE_HASHTABLE(denied_seen, 8); /* 256 buckets */
 
-static bool denied_seen_has(dev_t dev)
+static __always_inline bool denied_seen_has(dev_t dev)
 {
 	struct seen_node *p;
 	hash_for_each_possible(denied_seen, p, h, (u64)dev)
@@ -146,7 +125,7 @@ static bool denied_seen_has(dev_t dev)
 	return false;
 }
 
-static void denied_seen_add(dev_t dev)
+static __always_inline void denied_seen_add(dev_t dev)
 {
 	struct seen_node *n;
 	if (!dev || denied_seen_has(dev)) return;
@@ -156,12 +135,11 @@ static void denied_seen_add(dev_t dev)
 	hash_add(denied_seen, &n->h, (u64)dev);
 }
 
-/* ===== allowlist 解析：当前 dev_t 是否属于“允许分区” ===== */
+/* ===== Is this dev_t an allowlisted partition? (with slot suffix variants) ===== */
 static bool is_allowed_partition_dev_resolve(dev_t cur)
 {
 	size_t i;
 	dev_t dev;
-	const char *suf = slot_suffix_from_cmdline();
 
 	for (i = 0; i < allowlist_cnt; i++) {
 		const char *n = allowlist_names[i];
@@ -169,8 +147,8 @@ static bool is_allowed_partition_dev_resolve(dev_t cur)
 
 		if (resolve_byname_dev(n, &dev) && dev == cur) return true;
 
-		if (!ok && suf) {
-			char *nm = kasprintf(GFP_ATOMIC, "%s%s", n, suf);
+		if (!ok && bbg_slot_suffix) {
+			char *nm = kasprintf(GFP_ATOMIC, "%s%s", n, bbg_slot_suffix);
 			if (nm) {
 				ok = resolve_byname_dev(nm, &dev);
 				kfree(nm);
@@ -195,21 +173,21 @@ static bool is_allowed_partition_dev_resolve(dev_t cur)
 	return false;
 }
 
-/* ===== 首写反查兜底：命中允许分区则加入 allowed_devs ===== */
-static bool reverse_allow_match_and_cache(dev_t cur)
+/* ===== First-write reverse match & cache ===== */
+static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 {
 	if (!cur) return false;
 	if (is_allowed_partition_dev_resolve(cur)) { allow_add(cur); return true; }
 	return false;
 }
 
-/* ===== SELinux 域白名单（子串匹配） + SID 快速缓存 ===== */
+/* ===== SELinux domain whitelist (substring) + last SID fast cache ===== */
 #ifdef CONFIG_SECURITY_SELINUX
 static u32 sid_cache_last;
 static bool sid_cache_last_ok;
 #endif
 
-static bool current_domain_allowed_fast(void)
+static __always_inline bool current_domain_allowed_fast(void)
 {
 #ifdef CONFIG_SECURITY_SELINUX
 	u32 sid = 0;
@@ -228,7 +206,8 @@ static bool current_domain_allowed_fast(void)
 			if (needle && *needle && strnstr(ctx, needle, len)) { ok = true; break; }
 		}
 	}
-	security_release_secctx(ctx, len);
+	/* security_release_secctx expects (char *) */
+	if (ctx) security_release_secctx((char *)ctx, len);
 
 	sid_cache_last = sid;
 	sid_cache_last_ok = ok;
@@ -238,22 +217,22 @@ static bool current_domain_allowed_fast(void)
 #endif
 }
 
-/* ===== Logging throttles & helpers ===== */
-static unsigned int quiet_boot_ms = 10000; /* 引导早期静默，仅拦截 */
+/* ===== Logging throttles ===== */
+static unsigned int quiet_boot_ms __read_mostly = 10000; /* early boot quiet */
 module_param(quiet_boot_ms, uint, 0644);
 MODULE_PARM_DESC(quiet_boot_ms, "Suppress deny logs during early boot window (ms)");
 
-static unsigned int per_dev_log_limit = 1; /* 每个 dev 最多打印 N 条拒绝日志 */
+static unsigned int per_dev_log_limit __read_mostly = 1; /* max logs per dev this boot */
 module_param(per_dev_log_limit, uint, 0644);
 MODULE_PARM_DESC(per_dev_log_limit, "Max deny logs per block dev_t this boot");
 
-static unsigned long bbg_boot_jiffies; /* 记录 init 时刻 */
+static unsigned long bbg_boot_jiffies;
 
-/* 已记录过的 dev 计数表 */
+/* per-dev log counter */
 struct log_node { dev_t dev; u32 cnt; struct hlist_node h; };
-DEFINE_HASHTABLE(denied_logged, 7);
+DEFINE_HASHTABLE(denied_logged, 8);
 
-static bool bbg_should_log(dev_t dev)
+static __always_inline bool bbg_should_log(dev_t dev)
 {
 	struct log_node *p;
 	if (!dev) return false;
@@ -265,7 +244,6 @@ static bool bbg_should_log(dev_t dev)
 			return true;
 		}
 	}
-	/* 第一次：插入并计数为 1 */
 	p = kmalloc(sizeof(*p), GFP_ATOMIC);
 	if (!p) return false;
 	p->dev = dev;
@@ -274,8 +252,8 @@ static bool bbg_should_log(dev_t dev)
 	return true;
 }
 
-/* 取当前进程命令行（\0 → 空格） */
-static int bbg_get_cmdline(char *buf, int buflen)
+/* ===== Helpers (cold paths) ===== */
+static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 {
 	int n, i;
 	if (!buf || buflen <= 0) return 0;
@@ -287,40 +265,35 @@ static int bbg_get_cmdline(char *buf, int buflen)
 	return n;
 }
 
-/* === 仅输出命令行（argv），不打印 path / scontext === */
-static void bbg_log_deny_detail(const char *why, struct file *file, unsigned int cmd_opt)
+/* only argv in logs; no path, no selinux ctx */
+static __cold noinline void bbg_log_deny_detail(const char *why, unsigned int cmd_opt)
 {
-	const int CMD_BUFLEN  = 256;
-	char *cmdbuf  = kmalloc(CMD_BUFLEN,  GFP_ATOMIC);
+	const int CMD_BUFLEN = 256;
+	char *cmdbuf = kmalloc(CMD_BUFLEN, GFP_ATOMIC);
 
 	if (cmdbuf)
 		bbg_get_cmdline(cmdbuf, CMD_BUFLEN);
 
 	if (cmd_opt) {
-		pr_info_ratelimited(
-			"baseband_guard: deny %s cmd=0x%x argv=\"%s\"\n",
-			why, cmd_opt, cmdbuf ? cmdbuf : "?"
-		);
+		pr_info_ratelimited("baseband_guard: deny %s cmd=0x%x argv=\"%s\"\n",
+				    why, cmd_opt, cmdbuf ? cmdbuf : "?");
 	} else {
-		pr_info_ratelimited(
-			"baseband_guard: deny %s argv=\"%s\"\n",
-			why, cmdbuf ? cmdbuf : "?"
-		);
+		pr_info_ratelimited("baseband_guard: deny %s argv=\"%s\"\n",
+				    why, cmdbuf ? cmdbuf : "?");
 	}
-
 	kfree(cmdbuf);
 }
 
-static int deny(const char *why, struct file *file, unsigned int cmd_opt)
+static __cold noinline int deny(const char *why, struct file *file, unsigned int cmd_opt)
 {
 	if (!BB_ENFORCING) return 0;
 
-	/* 引导静默窗口：仍然拦截，但不打日志 */
+	/* early boot silent window: enforce without logs */
 	if (quiet_boot_ms &&
 	    time_before(jiffies, bbg_boot_jiffies + msecs_to_jiffies(quiet_boot_ms)))
 		return -EPERM;
 
-	/* 每个 dev 只打前 per_dev_log_limit 条日志，避免刷屏 */
+	/* per-dev log limiting */
 	if (file) {
 		struct inode *inode = file_inode(file);
 		if (inode && S_ISBLK(inode->i_mode)) {
@@ -330,46 +303,44 @@ static int deny(const char *why, struct file *file, unsigned int cmd_opt)
 		}
 	}
 
-	/* 单行简洁日志：只含 argv */
-	bbg_log_deny_detail(why, file, cmd_opt);
+	bbg_log_deny_detail(why, cmd_opt);
 	return -EPERM;
 }
 
-/* ===== 执法点 ===== */
+/* ===== Enforcement hooks ===== */
 
-/* 写：默认拒绝；命中进程/分区白名单（含首写反查缓存）→ 交由 SELinux 裁决 */
+/* Writes: default deny; on allowed process/partition → defer to SELinux (return 0) */
 static int bb_file_permission(struct file *file, int mask)
 {
 	struct inode *inode;
 	dev_t rdev;
 
-	if (!(mask & MAY_WRITE)) return 0;
-	if (!file) return 0;
+	if (likely(!(mask & MAY_WRITE))) return 0;
+	if (unlikely(!file)) return 0;
 
 	inode = file_inode(file);
-	if (!S_ISBLK(inode->i_mode)) return 0;
+	if (likely(!S_ISBLK(inode->i_mode))) return 0;
 
 	rdev = inode->i_rdev;
 
-	/* 进程域白名单（子串）：交由 SELinux 裁决 */
-	if (current_domain_allowed_fast())
+	/* allowed domains (substring) → defer to SELinux */
+	if (unlikely(current_domain_allowed_fast()))
 		return 0;
 
-	/* 分区白名单：命中缓存 → 交由 SELinux 裁决 */
-	if (allow_has(rdev))
+	/* allowed partitions (cache) → defer to SELinux */
+	if (likely(allow_has(rdev)))
 		return 0;
 
-	/* 未见过的 dev_t：做一次首写反查；命中则缓存并交由 SELinux */
-	if (!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev))
+	/* first-seen dev: one reverse resolve try; hit → cache & defer */
+	if (unlikely(!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev)))
 		return 0;
 
-	/* 反查失败：记入否定缓存，后续不再反查；本 LSM 拒绝 */
+	/* miss: remember and deny */
 	denied_seen_add(rdev);
 	return deny("write to protected partition", file, 0);
 }
 
-/* 仅拦截破坏性 ioctl；命中进程/分区白名单 → 交由 SELinux 裁决 */
-static bool is_destructive_ioctl(unsigned int cmd)
+static __always_inline bool is_destructive_ioctl(unsigned int cmd)
 {
 	switch (cmd) {
 	case BLKDISCARD:
@@ -396,27 +367,28 @@ static bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
+/* ioctls: only guard destructive ones */
 static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode;
 	dev_t rdev;
 
-	if (!file) return 0;
+	if (unlikely(!file)) return 0;
 	inode = file_inode(file);
-	if (!S_ISBLK(inode->i_mode)) return 0;
+	if (likely(!S_ISBLK(inode->i_mode))) return 0;
 
-	if (!is_destructive_ioctl(cmd))
+	if (likely(!is_destructive_ioctl(cmd)))
 		return 0;
 
 	rdev = inode->i_rdev;
 
-	if (current_domain_allowed_fast())
+	if (unlikely(current_domain_allowed_fast()))
 		return 0;
 
-	if (allow_has(rdev))
+	if (likely(allow_has(rdev)))
 		return 0;
 
-	if (!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev))
+	if (unlikely(!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev)))
 		return 0;
 
 	denied_seen_add(rdev);
@@ -430,22 +402,23 @@ static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned lo
 }
 #endif
 
-/* ===== LSM 注册 ===== */
-
+/* ===== LSM registration ===== */
 static struct security_hook_list bb_hooks[] = {
-	LSM_HOOK_INIT(file_permission,      bb_file_permission),
-	LSM_HOOK_INIT(file_ioctl,           bb_file_ioctl),
+	LSM_HOOK_INIT(file_permission,   bb_file_permission),
+	LSM_HOOK_INIT(file_ioctl,        bb_file_ioctl),
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
-	LSM_HOOK_INIT(file_ioctl_compat,    bb_file_ioctl_compat),
+	LSM_HOOK_INIT(file_ioctl_compat, bb_file_ioctl_compat),
 #endif
 };
 
 static int __init bbg_init(void)
 {
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
-	bbg_boot_jiffies = jiffies;  /* 记录 init 时间点 */
-	pr_info("baseband_guard_perf: init (power by TG@qdykernel; quiet=%ums per_dev=%u)\n",
-		quiet_boot_ms, per_dev_log_limit);
+
+	bbg_slot_suffix = slot_suffix_from_cmdline_once();
+
+	bbg_boot_jiffies = jiffies;
+	pr_info("baseband_guard_all power by https://t.me/qdykernel\n");
 	return 0;
 }
 
