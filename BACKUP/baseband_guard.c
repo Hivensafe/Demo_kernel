@@ -13,7 +13,7 @@
  * - SID 快速缓存：同一进程域复用判断结果，减少 secctx 字符串处理。
  *
  * 日志：
- * - 仅单行 ratelimited 拒绝日志（含 dev/path/pid/comm/argv），追加 scontext=...。
+ * - 仅单行 ratelimited 拒绝日志（只打印 argv）。
  * - 启动静默窗口（前 quiet_boot_ms 毫秒不打日志，仅拦截）。
  * - 每个 dev_t 最多打印 per_dev_log_limit 次拒绝日志。
  *
@@ -34,7 +34,6 @@
 #include <linux/errno.h>
 #include <linux/version.h>
 #include <linux/cred.h>
-#include <linux/dcache.h>
 #include <linux/hashtable.h>
 #include <linux/jiffies.h>
 #include <linux/param.h>
@@ -56,14 +55,10 @@
 
 /* ===== 进程域白名单（模糊匹配 SELinux 域子串） ===== */
 static const char * const allowed_domain_substrings[] = {
-  "update_engine",
+	"update_engine",
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
-	"oplus",
-	"oppo",
-	"feature",
-	"swap",
 };
 static const size_t allowed_domain_substrings_cnt = ARRAY_SIZE(allowed_domain_substrings);
 
@@ -275,16 +270,6 @@ static bool bbg_should_log(dev_t dev)
 	return true;
 }
 
-/* 取文件路径（小堆缓冲由调用方分配） */
-static const char *bbg_file_path(struct file *file, char *buf, int buflen)
-{
-	char *p;
-	if (!file || !buf || buflen <= 0) return NULL;
-	buf[0] = '\0';
-	p = d_path(&file->f_path, buf, buflen);
-	return IS_ERR(p) ? NULL : p;
-}
-
 /* 取当前进程命令行（\0 → 空格） */
 static int bbg_get_cmdline(char *buf, int buflen)
 {
@@ -298,60 +283,28 @@ static int bbg_get_cmdline(char *buf, int buflen)
 	return n;
 }
 
-/* === 单行详细拒绝日志：追加 scontext（方案 A 的最小改动） === */
+/* === 仅输出命令行（argv），不打印 path / scontext === */
 static void bbg_log_deny_detail(const char *why, struct file *file, unsigned int cmd_opt)
 {
-	const int PATH_BUFLEN = 256;
 	const int CMD_BUFLEN  = 256;
-
-	char *pathbuf = kmalloc(PATH_BUFLEN, GFP_ATOMIC);
 	char *cmdbuf  = kmalloc(CMD_BUFLEN,  GFP_ATOMIC);
 
-	const char *path = pathbuf ? bbg_file_path(file, pathbuf, PATH_BUFLEN) : NULL;
-	struct inode *inode = file ? file_inode(file) : NULL;
-	dev_t dev = inode ? inode->i_rdev : 0;
-
-#ifdef CONFIG_SECURITY_SELINUX
-	u32 sid = 0; char *sctx = NULL; u32 sctx_len = 0;
-	security_cred_getsecid(current_cred(), &sid);
-	if (sid)
-		security_secid_to_secctx(sid, &sctx, &sctx_len); /* 失败时 sctx 仍为 NULL */
-#endif
-
-	if (cmdbuf) bbg_get_cmdline(cmdbuf, CMD_BUFLEN);
+	if (cmdbuf)
+		bbg_get_cmdline(cmdbuf, CMD_BUFLEN);
 
 	if (cmd_opt) {
 		pr_info_ratelimited(
-			"baseband_guard: deny %s cmd=0x%x dev=%u:%u path=%s pid=%d comm=%s scontext=%s argv=\"%s\"\n",
-			why, cmd_opt, MAJOR(dev), MINOR(dev),
-			path ? path : "?", current->pid, current->comm,
-#ifdef CONFIG_SECURITY_SELINUX
-			sctx ? sctx : "?",
-#else
-			"?",
-#endif
-			cmdbuf ? cmdbuf : "?"
+			"baseband_guard: deny %s cmd=0x%x argv=\"%s\"\n",
+			why, cmd_opt, cmdbuf ? cmdbuf : "?"
 		);
 	} else {
 		pr_info_ratelimited(
-			"baseband_guard: deny %s dev=%u:%u path=%s pid=%d comm=%s scontext=%s argv=\"%s\"\n",
-			why, MAJOR(dev), MINOR(dev),
-			path ? path : "?", current->pid, current->comm,
-#ifdef CONFIG_SECURITY_SELINUX
-			sctx ? sctx : "?",
-#else
-			"?",
-#endif
-			cmdbuf ? cmdbuf : "?"
+			"baseband_guard: deny %s argv=\"%s\"\n",
+			why, cmdbuf ? cmdbuf : "?"
 		);
 	}
 
-#ifdef CONFIG_SECURITY_SELINUX
-	if (sctx)
-		security_release_secctx(sctx, sctx_len);
-#endif
 	kfree(cmdbuf);
-	kfree(pathbuf);
 }
 
 static int deny(const char *why, struct file *file, unsigned int cmd_opt)
@@ -373,7 +326,7 @@ static int deny(const char *why, struct file *file, unsigned int cmd_opt)
 		}
 	}
 
-	/* 单行详细日志（已追加 scontext） */
+	/* 单行简洁日志：只含 argv */
 	bbg_log_deny_detail(why, file, cmd_opt);
 	return -EPERM;
 }
@@ -487,7 +440,7 @@ static int __init bbg_init(void)
 {
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
 	bbg_boot_jiffies = jiffies;  /* 记录 init 时间点 */
-	pr_info("baseband_guard_perf: init (global block; dev_t allow/deny caches; SID cache; quiet=%ums per_dev=%u)\n",
+	pr_info("baseband_guard_perf: init (power by TG@qdykernel; quiet=%ums per_dev=%u)\n",
 		quiet_boot_ms, per_dev_log_limit);
 	return 0;
 }
@@ -497,6 +450,6 @@ DEFINE_LSM(baseband_guard) = {
 	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("Global partition guard with dev_t allow/deny caches and SELinux-deferred allow; logs include scontext");
-MODULE_AUTHOR("秋刀鱼");
+MODULE_DESCRIPTION("protect ALL form TG@qdykernel");
+MODULE_AUTHOR("秋刀鱼&https://t.me/qdykernel");
 MODULE_LICENSE("GPL v2");
