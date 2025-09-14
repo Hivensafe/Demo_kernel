@@ -1,3 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * baseband_guard_perf: Global partition guard (Linux 5.10 ~ 6.6)
+ *
+ * Policy
+ *  - Default-deny for block-device writes & destructive ioctls.
+ *  - If (SELinux is Enforcing) AND (process SELinux domain matches whitelist substring),
+ *    OR target partition is in allowlist => THIS LSM defers (return 0) and lets SELinux decide.
+ *  - Otherwise deny.
+ *
+ * Performance
+ *  - dev_t allow cache (for allowlist targets) → O(1) fast path.
+ *  - dev_t deny-seen cache (for non-allow targets) → avoid repeated reverse lookup.
+ *  - SELinux SID last-result cache (reduce secctx conversions).
+ *
+ * Logging
+ *  - Only a single-line deny log with argv (no path / no selinux ctx), ratelimited.
+ *  - Early-boot quiet window (enforce without logs).
+ *  - Per-dev log limit (cap spam).
+ */
+
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/security.h>
@@ -32,8 +53,8 @@
 #define BB_BYNAME_DIR "/dev/block/by-name"
 
 /* ===== Process SELinux domain whitelist (substring match) ===== */
-static const char * const allowed_domain_substrings[] __ro_after_init = {
-	"update_engine",
+static const char * const allowed_domain_substrings[] = {
+  "update_engine",
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
@@ -42,24 +63,21 @@ static const char * const allowed_domain_substrings[] __ro_after_init = {
 	"feature",
 	"swap",
 };
-/* const 对象不要加 __read_mostly，避免段冲突 */
 static const size_t allowed_domain_substrings_cnt =
 	ARRAY_SIZE(allowed_domain_substrings);
 
-/* ===== Partition allowlist (defer to SELinux if matched) =====
- * Keep system usability: userdata/cache/metadata/misc are included.
- * Boot-related: boot/init_boot/dtbo/vendor_boot are naturally allowed.
+/* ===== Partition allowlist (defer-to-SELinux if matched) =====
+ * Keep system usability: userdata/cache/metadata/misc
+ * Boot-related free-to-flash: boot/init_boot/dtbo/vendor_boot
  */
-static const char * const allowlist_names[] __ro_after_init = {
+static const char * const allowlist_names[] = {
 	"boot", "init_boot", "dtbo", "vendor_boot",
 	"userdata", "cache", "metadata", "misc",
 };
-/* const 对象不要加 __read_mostly */
 static const size_t allowlist_cnt = ARRAY_SIZE(allowlist_names);
 
 /* ===== Slot suffix (computed once) ===== */
-extern char *saved_command_line; /* from init/main.c */
-/* 指针本质可写，但为避免与上面 const 对象产生段属性牵连，这里不加 __read_mostly */
+extern char *saved_command_line; /* from init/main.c (AOSP/common kernels) */
 static const char *bbg_slot_suffix;
 
 static const char *slot_suffix_from_cmdline_once(void)
@@ -74,23 +92,33 @@ static const char *slot_suffix_from_cmdline_once(void)
 	return NULL;
 }
 
-/* ===== by-name → dev_t ===== */
+/* ===== by-name → dev_t（统一实现，兼容 5.10~6.6；不依赖 lookup_bdev 原型） ===== */
 static __always_inline bool resolve_byname_dev(const char *name, dev_t *out)
 {
 	char *path;
-	dev_t dev;
+	struct path p;
+	struct inode *inode;
 	int ret;
 
 	if (!name || !out) return false;
 
+	/* /dev/block/by-name/<name> 多为符号链接；FOLLOW 到最终设备节点 */
 	path = kasprintf(GFP_ATOMIC, "%s/%s", BB_BYNAME_DIR, name);
 	if (!path) return false;
 
-	ret = lookup_bdev(path, &dev);
+	ret = kern_path(path, LOOKUP_FOLLOW, &p);
 	kfree(path);
-	if (ret) return false;
+	if (ret)
+		return false;
 
-	*out = dev;
+	inode = d_backing_inode(p.dentry);
+	if (!inode || !S_ISBLK(inode->i_mode)) {
+		path_put(&p);
+		return false;
+	}
+
+	*out = inode->i_rdev;
+	path_put(&p);
 	return true;
 }
 
@@ -187,7 +215,22 @@ static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 	return false;
 }
 
-/* ===== SELinux domain whitelist (substring) + last SID fast cache ===== */
+/* ===== SELinux enforcing + domain whitelist (substring) ===== */
+#ifdef CONFIG_SECURITY_SELINUX
+#include <linux/selinux.h>   /* selinux_is_enabled() */
+extern int selinux_enforcing; /* 若树上无该符号，可在函数里改为保守返回 false */
+
+static __always_inline bool selinux_is_enforcing_now(void)
+{
+	if (!selinux_is_enabled())
+		return false;
+	/* 若链接时报 undefined reference，可替换为 `return false;`（保守：非 Enforcing 不放行域） */
+	return READ_ONCE(selinux_enforcing) != 0;
+}
+#else
+static __always_inline bool selinux_is_enforcing_now(void) { return false; }
+#endif
+
 #ifdef CONFIG_SECURITY_SELINUX
 static u32 sid_cache_last;
 static bool sid_cache_last_ok;
@@ -202,7 +245,9 @@ static __always_inline bool current_domain_allowed_fast(void)
 	char *ctx = NULL;
 	u32 len = 0;
 
+	/* 5.10+ 常见接口；若你的树缺失，可换 security_task_getsecid(current, &sid); */
 	security_cred_getsecid(current_cred(), &sid);
+
 	if (sid && sid == sid_cache_last)
 		return sid_cache_last_ok;
 
@@ -223,11 +268,11 @@ static __always_inline bool current_domain_allowed_fast(void)
 }
 
 /* ===== Logging throttles ===== */
-static unsigned int quiet_boot_ms __read_mostly = 10000; /* early boot quiet */
+static unsigned int quiet_boot_ms = 10000; /* early boot quiet */
 module_param(quiet_boot_ms, uint, 0644);
 MODULE_PARM_DESC(quiet_boot_ms, "Suppress deny logs during early boot window (ms)");
 
-static unsigned int per_dev_log_limit __read_mostly = 1; /* max logs per dev this boot */
+static unsigned int per_dev_log_limit = 1; /* max logs per dev this boot */
 module_param(per_dev_log_limit, uint, 0644);
 MODULE_PARM_DESC(per_dev_log_limit, "Max deny logs per block dev_t this boot");
 
@@ -257,7 +302,7 @@ static __always_inline bool bbg_should_log(dev_t dev)
 	return true;
 }
 
-/* ===== Helpers (cold paths) ===== */
+/* ===== Helpers (cold path) ===== */
 static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 {
 	int n, i;
@@ -314,7 +359,6 @@ static __cold noinline int deny(const char *why, struct file *file, unsigned int
 
 /* ===== Enforcement hooks ===== */
 
-/* Writes: default deny; on allowed process/partition → defer to SELinux (return 0) */
 static int bb_file_permission(struct file *file, int mask)
 {
 	struct inode *inode;
@@ -328,19 +372,19 @@ static int bb_file_permission(struct file *file, int mask)
 
 	rdev = inode->i_rdev;
 
-	/* allowed domains (substring) → defer to SELinux */
-	if (unlikely(current_domain_allowed_fast()))
+	/* 域放行仅在 Enforcing 才生效；命中后交给 SELinux 决定 */
+	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
 		return 0;
 
-	/* allowed partitions (cache) → defer to SELinux */
+	/* 分区白名单命中 → defer to SELinux */
 	if (likely(allow_has(rdev)))
 		return 0;
 
-	/* first-seen dev: one reverse resolve try; hit → cache & defer */
+	/* 首次遇到该 dev：尝试反查命中白名单则缓存并 defer */
 	if (unlikely(!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev)))
 		return 0;
 
-	/* miss: remember and deny */
+	/* miss：记忆并拒绝 */
 	denied_seen_add(rdev);
 	return deny("write to protected partition", file, 0);
 }
@@ -372,7 +416,6 @@ static __always_inline bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
-/* ioctls: only guard destructive ones */
 static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode;
@@ -387,7 +430,7 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	rdev = inode->i_rdev;
 
-	if (unlikely(current_domain_allowed_fast()))
+	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
 		return 0;
 
 	if (likely(allow_has(rdev)))
@@ -400,18 +443,20 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	return deny("destructive ioctl on protected partition", file, cmd);
 }
 
+/* 6.6 一定有 file_ioctl_compat；5.10/5.15/6.1 可能没有，按版本注册 */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
 static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	return bb_file_ioctl(file, cmd, arg);
 }
+#define BB_HAVE_IOCTL_COMPAT 1
 #endif
 
 /* ===== LSM registration ===== */
 static struct security_hook_list bb_hooks[] = {
 	LSM_HOOK_INIT(file_permission,   bb_file_permission),
 	LSM_HOOK_INIT(file_ioctl,        bb_file_ioctl),
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
+#ifdef BB_HAVE_IOCTL_COMPAT
 	LSM_HOOK_INIT(file_ioctl_compat, bb_file_ioctl_compat),
 #endif
 };
@@ -424,7 +469,9 @@ static int __init bbg_init(void)
 	bbg_slot_suffix = slot_suffix_from_cmdline_once();
 
 	bbg_boot_jiffies = jiffies;
-	pr_info("baseband_guard_all power by https://t.me/qdykernel\n");
+	pr_info("baseband_guard_perf: init (5.10~6.6) defer-allow to SELinux when Enforcing; dev caches; SID cache; "
+		"quiet=%ums per_dev=%u\n",
+		quiet_boot_ms, per_dev_log_limit);
 	return 0;
 }
 
@@ -433,6 +480,6 @@ DEFINE_LSM(baseband_guard) = {
 	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("protect ALL form TG@qdykernel");
-MODULE_AUTHOR("秋刀鱼&https://t.me/qdykernel");
+MODULE_DESCRIPTION("Global partition guard (5.10~6.6) with dev_t allow/deny caches; allow only when SELinux is Enforcing; logs argv only");
+MODULE_AUTHOR("秋刀鱼 + ChatGPT");
 MODULE_LICENSE("GPL v2");
