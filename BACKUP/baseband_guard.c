@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * baseband_guard_all (perf tuned)
- * - 全分区拦截（除 allowlist 分区交由 SELinux）
- * - 进程白名单（substring），仅在 SELinux Enforcing 时才生效，命中后交由 SELinux 决策
- * - 首写兜底 dev_t 反查并缓存
- * - 日志仅输出 argv（避免 path/disk 乱码），支持早期静默与每设备限频
- * - 兼容 Linux 5.10 ~ 6.6（by-name→dev_t 统一用 kern_path）
- */
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/security.h>
@@ -29,6 +19,7 @@
 #include <linux/sched/task.h>
 
 #define BB_ENFORCING 1
+#define BB_BYNAME_DIR "/dev/block/by-name"
 
 #ifdef CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE
 #define BB_VERBOSE 1
@@ -39,9 +30,7 @@
 #define bb_pr(fmt, ...)    pr_debug("baseband_guard: " fmt, ##__VA_ARGS__)
 #define bb_pr_rl(fmt, ...) pr_info_ratelimited("baseband_guard: " fmt, ##__VA_ARGS__)
 
-#define BB_BYNAME_DIR "/dev/block/by-name"
-
-/* ===== Process SELinux domain whitelist (substring match) ===== */
+/* ===== 域白名单（secctx 子串匹配；仅 Enforcing 生效） ===== */
 static const char * const allowed_domain_substrings[] = {
 	"update_engine",
 	"fastbootd",
@@ -57,12 +46,11 @@ static const char * const allowed_domain_substrings[] = {
 	"vendor_qti",
 	"mi_ric",
 };
-static const size_t allowed_domain_substrings_cnt =
-	ARRAY_SIZE(allowed_domain_substrings);
+static const size_t allowed_domain_substrings_cnt = ARRAY_SIZE(allowed_domain_substrings);
 
-/* ===== Partition allowlist (defer-to-SELinux if matched) =====
- * Keep system usability: userdata/cache/metadata/misc
- * Boot-related free-to-flash: boot/init_boot/dtbo/vendor_boot
+/* ===== 分区白名单（命中则交由 SELinux 决定） =====
+ * 可用性：userdata/cache/metadata/misc
+ * 允许刷写：boot/init_boot/dtbo/vendor_boot
  */
 static const char * const allowlist_names[] = {
 	"boot", "init_boot", "dtbo", "vendor_boot",
@@ -70,8 +58,8 @@ static const char * const allowlist_names[] = {
 };
 static const size_t allowlist_cnt = ARRAY_SIZE(allowlist_names);
 
-/* ===== Slot suffix (computed once) ===== */
-extern char *saved_command_line; /* from init/main.c (AOSP/common kernels) */
+/* ===== A/B 后缀 ===== */
+extern char *saved_command_line; /* from init/main.c（AOSP/common） */
 static const char *bbg_slot_suffix;
 
 static const char *slot_suffix_from_cmdline_once(void)
@@ -86,7 +74,7 @@ static const char *slot_suffix_from_cmdline_once(void)
 	return NULL;
 }
 
-/* ===== by-name → dev_t（统一实现，兼容 5.10~6.6；不依赖 lookup_bdev 原型） ===== */
+/* ===== by-name → dev_t（统一实现；兼容 5.10~6.6） ===== */
 static __always_inline bool resolve_byname_dev(const char *name, dev_t *out)
 {
 	char *path;
@@ -115,7 +103,7 @@ static __always_inline bool resolve_byname_dev(const char *name, dev_t *out)
 	return true;
 }
 
-/* ===== Allowed dev_t cache ===== */
+/* ===== 允许 dev_t 缓存（快速命中） ===== */
 struct allow_node { dev_t dev; struct hlist_node h; };
 DEFINE_HASHTABLE(allowed_devs, 8); /* 256 buckets */
 
@@ -140,7 +128,7 @@ static __always_inline void allow_add(dev_t dev)
 #endif
 }
 
-/* ===== Deny-seen dev_t cache (avoid repeated reverse lookups) ===== */
+/* ===== 拒绝过的 dev_t（避免频繁反查） ===== */
 struct seen_node { dev_t dev; struct hlist_node h; };
 DEFINE_HASHTABLE(denied_seen, 8); /* 256 buckets */
 
@@ -162,7 +150,7 @@ static __always_inline void denied_seen_add(dev_t dev)
 	hash_add(denied_seen, &n->h, (u64)dev);
 }
 
-/* ===== Is this dev_t an allowlisted partition? (with slot suffix variants) ===== */
+/* ===== 分区是否允许（带 A/B/slot_suffix 变体） ===== */
 static bool is_allowed_partition_dev_resolve(dev_t cur)
 {
 	size_t i;
@@ -200,7 +188,7 @@ static bool is_allowed_partition_dev_resolve(dev_t cur)
 	return false;
 }
 
-/* ===== First-write reverse match & cache ===== */
+/* ===== 首写反查兜底（仅用于 allowlist） ===== */
 static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 {
 	if (!cur) return false;
@@ -208,30 +196,34 @@ static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 	return false;
 }
 
-/* ===== SELinux enforcing + domain whitelist（弱符号，兼容 5.10~6.6） ===== */
+/* ===== SELinux enforcing + 域白名单 ===== */
+/* 不包含 <linux/selinux.h>；弱依赖外部符号，通过 CONFIG_SECURITY_SELINUX 宏控制 */
 #ifdef CONFIG_SECURITY_SELINUX
-/* 注意：5.10 GKI 可能未导出这两个符号，因此用弱符号并在运行时判空 */
-extern int selinux_enforcing __attribute__((weak));
-extern int selinux_enabled  __attribute__((weak));
+extern int selinux_enforcing;
+extern int selinux_enabled;
 
 static __always_inline bool selinux_is_enforcing_now(void)
 {
-	/* 若符号未导出，&selinux_* 为 NULL，按非 Enforcing 处理 */
-	if (&selinux_enabled && READ_ONCE(selinux_enabled) == 0)
+	if (!READ_ONCE(selinux_enabled))
 		return false;
-	if (&selinux_enforcing)
-		return READ_ONCE(selinux_enforcing) != 0;
-	return false;
+	return READ_ONCE(selinux_enforcing) != 0;
 }
 #else
 static __always_inline bool selinux_is_enforcing_now(void) { return false; }
 #endif
+
+/* 仅在 Enforcing 下使用域白名单 */
+static bool require_enforcing_for_domain = true;
+module_param(require_enforcing_for_domain, bool, 0644);
+MODULE_PARM_DESC(require_enforcing_for_domain,
+		 "Honor domain whitelist only when SELinux is Enforcing");
 
 #ifdef CONFIG_SECURITY_SELINUX
 static u32 sid_cache_last;
 static bool sid_cache_last_ok;
 #endif
 
+/* 只在 Enforcing 下用 secctx 子串匹配；无 comm 回退、未启 SELinux 返回 false */
 static __always_inline bool current_domain_allowed_fast(void)
 {
 #ifdef CONFIG_SECURITY_SELINUX
@@ -240,6 +232,9 @@ static __always_inline bool current_domain_allowed_fast(void)
 	size_t i;
 	char *ctx = NULL;
 	u32 len = 0;
+
+	if (require_enforcing_for_domain && !selinux_is_enforcing_now())
+		return false;
 
 	security_cred_getsecid(current_cred(), &sid);
 
@@ -262,18 +257,18 @@ static __always_inline bool current_domain_allowed_fast(void)
 #endif
 }
 
-/* ===== Logging throttles ===== */
-static unsigned int quiet_boot_ms = 10000; /* early boot quiet */
+/* ===== 日志控制 ===== */
+static unsigned int quiet_boot_ms = 10000; /* 开机静默窗口 */
 module_param(quiet_boot_ms, uint, 0644);
 MODULE_PARM_DESC(quiet_boot_ms, "Suppress deny logs during early boot window (ms)");
 
-static unsigned int per_dev_log_limit = 1; /* max logs per dev this boot */
+static unsigned int per_dev_log_limit = 1; /* 每个 dev_t 本次开机最多 N 条拒绝日志 */
 module_param(per_dev_log_limit, uint, 0644);
 MODULE_PARM_DESC(per_dev_log_limit, "Max deny logs per block dev_t this boot");
 
 static unsigned long bbg_boot_jiffies;
 
-/* per-dev log counter */
+/* per-dev 限频计数 */
 struct log_node { dev_t dev; u32 cnt; struct hlist_node h; };
 DEFINE_HASHTABLE(denied_logged, 8);
 
@@ -297,7 +292,7 @@ static __always_inline bool bbg_should_log(dev_t dev)
 	return true;
 }
 
-/* ===== Helpers (cold path) ===== */
+/* 仅抓 argv，用于日志 */
 static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 {
 	int n, i;
@@ -310,7 +305,6 @@ static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 	return n;
 }
 
-/* only argv in logs; no path, no selinux ctx */
 static __cold noinline void bbg_log_deny_detail(const char *why, unsigned int cmd_opt)
 {
 	const int CMD_BUFLEN = 256;
@@ -333,12 +327,12 @@ static __cold noinline int deny(const char *why, struct file *file, unsigned int
 {
 	if (!BB_ENFORCING) return 0;
 
-	/* early boot silent window: enforce without logs */
+	/* 开机静默窗口：只执行拒绝，不打日志 */
 	if (quiet_boot_ms &&
 	    time_before(jiffies, bbg_boot_jiffies + msecs_to_jiffies(quiet_boot_ms)))
 		return -EPERM;
 
-	/* per-dev log limiting */
+	/* 每 dev_t 限频 */
 	if (file) {
 		struct inode *inode = file_inode(file);
 		if (inode && S_ISBLK(inode->i_mode)) {
@@ -352,38 +346,7 @@ static __cold noinline int deny(const char *why, struct file *file, unsigned int
 	return -EPERM;
 }
 
-/* ===== Enforcement hooks ===== */
-
-static int bb_file_permission(struct file *file, int mask)
-{
-	struct inode *inode;
-	dev_t rdev;
-
-	if (likely(!(mask & MAY_WRITE))) return 0;
-	if (unlikely(!file)) return 0;
-
-	inode = file_inode(file);
-	if (likely(!S_ISBLK(inode->i_mode))) return 0;
-
-	rdev = inode->i_rdev;
-
-	/* 域白名单仅在 SELinux Enforcing 才生效；命中后交给 SELinux 决定 */
-	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
-		return 0;
-
-	/* 分区白名单命中 → defer to SELinux */
-	if (likely(allow_has(rdev)))
-		return 0;
-
-	/* 首次遇到该 dev：尝试反查命中白名单则缓存并 defer */
-	if (unlikely(!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev)))
-		return 0;
-
-	/* miss：记忆并拒绝 */
-	denied_seen_add(rdev);
-	return deny("write to protected partition", file, 0);
-}
-
+/* ===== 破坏性 ioctl 枚举 ===== */
 static __always_inline bool is_destructive_ioctl(unsigned int cmd)
 {
 	switch (cmd) {
@@ -411,6 +374,37 @@ static __always_inline bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
+/* ===== LSM 钩子 ===== */
+static int bb_file_permission(struct file *file, int mask)
+{
+	struct inode *inode;
+	dev_t rdev;
+
+	if (likely(!(mask & MAY_WRITE))) return 0;
+	if (unlikely(!file)) return 0;
+
+	inode = file_inode(file);
+	if (likely(!S_ISBLK(inode->i_mode))) return 0;
+
+	rdev = inode->i_rdev;
+
+	/* 域白名单（仅 Enforcing 生效；放行后交给 SELinux） */
+	if (unlikely(current_domain_allowed_fast()))
+		return 0;
+
+	/* 分区白名单命中 → 交由 SELinux */
+	if (likely(allow_has(rdev)))
+		return 0;
+
+	/* 首次遇到该 dev：若反查命中 allowlist → 缓存并交由 SELinux */
+	if (unlikely(!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev)))
+		return 0;
+
+	/* miss：记忆并拒绝 */
+	denied_seen_add(rdev);
+	return deny("write to protected partition", file, 0);
+}
+
 static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode;
@@ -425,15 +419,12 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	rdev = inode->i_rdev;
 
-	/* 域白名单（仅 Enforcing）→ 交给 SELinux */
-	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
+	if (unlikely(current_domain_allowed_fast()))
 		return 0;
 
-	/* 分区白名单 → 交给 SELinux */
 	if (likely(allow_has(rdev)))
 		return 0;
 
-	/* 首次反查命中 → 交给 SELinux */
 	if (unlikely(!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev)))
 		return 0;
 
@@ -441,7 +432,7 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	return deny("destructive ioctl on protected partition", file, cmd);
 }
 
-/* 6.6 一定有 file_ioctl_compat；5.10/5.15/6.1 可能没有，按版本注册 */
+/* 6.6 起具有 file_ioctl_compat */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
 static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -450,7 +441,7 @@ static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned lo
 #define BB_HAVE_IOCTL_COMPAT 1
 #endif
 
-/* ===== LSM registration ===== */
+/* ===== 注册 ===== */
 static struct security_hook_list bb_hooks[] = {
 	LSM_HOOK_INIT(file_permission,   bb_file_permission),
 	LSM_HOOK_INIT(file_ioctl,        bb_file_ioctl),
@@ -462,12 +453,9 @@ static struct security_hook_list bb_hooks[] = {
 static int __init bbg_init(void)
 {
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
-
-	/* compute slot suffix once */
 	bbg_slot_suffix = slot_suffix_from_cmdline_once();
-
 	bbg_boot_jiffies = jiffies;
-	pr_info("baseband_guard_all power by https://t.me/qdykernel\n");
+	pr_info("baseband_guard power by https://t.me/qdykernel\n");
 	return 0;
 }
 
@@ -476,6 +464,6 @@ DEFINE_LSM(baseband_guard) = {
 	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("protect ALL form TG@qdykernel");
-MODULE_AUTHOR("秋刀鱼&https://t.me/qdykernel");
+MODULE_DESCRIPTION("baseband_guard power by TG@qdykernel");
+MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
