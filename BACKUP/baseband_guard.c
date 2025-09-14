@@ -1,24 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * baseband_guard_perf: Global partition guard (Linux 5.10 ~ 6.6)
- *
- * Policy
- *  - Default-deny for block-device writes & destructive ioctls.
- *  - If (SELinux is Enforcing) AND (process SELinux domain matches whitelist substring),
- *    OR target partition is in allowlist => THIS LSM defers (return 0) and lets SELinux decide.
- *  - Otherwise deny.
- *
- * Performance
- *  - dev_t allow cache (for allowlist targets) → O(1) fast path.
- *  - dev_t deny-seen cache (for non-allow targets) → avoid repeated reverse lookup.
- *  - SELinux SID last-result cache (reduce secctx conversions).
- *
- * Logging
- *  - Only a single-line deny log with argv (no path / no selinux ctx), ratelimited.
- *  - Early-boot quiet window (enforce without logs).
- *  - Per-dev log limit (cap spam).
- */
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/security.h>
@@ -54,7 +33,7 @@
 
 /* ===== Process SELinux domain whitelist (substring match) ===== */
 static const char * const allowed_domain_substrings[] = {
-  "update_engine",
+	"update_engine",
 	"fastbootd",
 	"recovery",
 	"rmt_storage",
@@ -62,6 +41,11 @@ static const char * const allowed_domain_substrings[] = {
 	"oppo",
 	"feature",
 	"swap",
+	"system_perf_init",
+	"hal_bootctl_default",
+	"fsck",
+	"vendor_qti",
+	"mi_ric",
 };
 static const size_t allowed_domain_substrings_cnt =
 	ARRAY_SIZE(allowed_domain_substrings);
@@ -102,7 +86,6 @@ static __always_inline bool resolve_byname_dev(const char *name, dev_t *out)
 
 	if (!name || !out) return false;
 
-	/* /dev/block/by-name/<name> 多为符号链接；FOLLOW 到最终设备节点 */
 	path = kasprintf(GFP_ATOMIC, "%s/%s", BB_BYNAME_DIR, name);
 	if (!path) return false;
 
@@ -216,15 +199,15 @@ static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 }
 
 /* ===== SELinux enforcing + domain whitelist (substring) ===== */
+/* 兼容 5.10~6.6：不用 <linux/selinux.h>，只做弱依赖外部符号 */
 #ifdef CONFIG_SECURITY_SELINUX
-#include <linux/selinux.h>   /* selinux_is_enabled() */
-extern int selinux_enforcing; /* 若树上无该符号，可在函数里改为保守返回 false */
+extern int selinux_enforcing;
+extern int selinux_enabled;
 
 static __always_inline bool selinux_is_enforcing_now(void)
 {
-	if (!selinux_is_enabled())
+	if (!READ_ONCE(selinux_enabled))
 		return false;
-	/* 若链接时报 undefined reference，可替换为 `return false;`（保守：非 Enforcing 不放行域） */
 	return READ_ONCE(selinux_enforcing) != 0;
 }
 #else
@@ -245,7 +228,6 @@ static __always_inline bool current_domain_allowed_fast(void)
 	char *ctx = NULL;
 	u32 len = 0;
 
-	/* 5.10+ 常见接口；若你的树缺失，可换 security_task_getsecid(current, &sid); */
 	security_cred_getsecid(current_cred(), &sid);
 
 	if (sid && sid == sid_cache_last)
@@ -469,9 +451,7 @@ static int __init bbg_init(void)
 	bbg_slot_suffix = slot_suffix_from_cmdline_once();
 
 	bbg_boot_jiffies = jiffies;
-	pr_info("baseband_guard_perf: init (5.10~6.6) defer-allow to SELinux when Enforcing; dev caches; SID cache; "
-		"quiet=%ums per_dev=%u\n",
-		quiet_boot_ms, per_dev_log_limit);
+	pr_info("baseband_guard_all power by https://t.me/qdykernel\n");
 	return 0;
 }
 
@@ -480,6 +460,6 @@ DEFINE_LSM(baseband_guard) = {
 	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("Global partition guard (5.10~6.6) with dev_t allow/deny caches; allow only when SELinux is Enforcing; logs argv only");
-MODULE_AUTHOR("秋刀鱼 + ChatGPT");
+MODULE_DESCRIPTION("protect ALL form TG@qdykernel");
+MODULE_AUTHOR("秋刀鱼&https://t.me/qdykernel");
 MODULE_LICENSE("GPL v2");
