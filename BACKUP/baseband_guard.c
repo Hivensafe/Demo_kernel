@@ -1,3 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * baseband_guard_all (perf tuned)
+ * - 全分区拦截（除 allowlist 分区交由 SELinux）
+ * - 进程白名单（substring），仅在 SELinux Enforcing 时才生效，命中后交由 SELinux 决策
+ * - 首写兜底 dev_t 反查并缓存
+ * - 日志仅输出 argv（避免 path/disk 乱码），支持早期静默与每设备限频
+ * - 兼容 Linux 5.10 ~ 6.6（by-name→dev_t 统一用 kern_path）
+ */
+
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/security.h>
@@ -198,17 +208,20 @@ static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 	return false;
 }
 
-/* ===== SELinux enforcing + domain whitelist (substring) ===== */
-/* 兼容 5.10~6.6：不用 <linux/selinux.h>，只做弱依赖外部符号 */
+/* ===== SELinux enforcing + domain whitelist（弱符号，兼容 5.10~6.6） ===== */
 #ifdef CONFIG_SECURITY_SELINUX
-extern int selinux_enforcing;
-extern int selinux_enabled;
+/* 注意：5.10 GKI 可能未导出这两个符号，因此用弱符号并在运行时判空 */
+extern int selinux_enforcing __attribute__((weak));
+extern int selinux_enabled  __attribute__((weak));
 
 static __always_inline bool selinux_is_enforcing_now(void)
 {
-	if (!READ_ONCE(selinux_enabled))
+	/* 若符号未导出，&selinux_* 为 NULL，按非 Enforcing 处理 */
+	if (&selinux_enabled && READ_ONCE(selinux_enabled) == 0)
 		return false;
-	return READ_ONCE(selinux_enforcing) != 0;
+	if (&selinux_enforcing)
+		return READ_ONCE(selinux_enforcing) != 0;
+	return false;
 }
 #else
 static __always_inline bool selinux_is_enforcing_now(void) { return false; }
@@ -354,7 +367,7 @@ static int bb_file_permission(struct file *file, int mask)
 
 	rdev = inode->i_rdev;
 
-	/* 域放行仅在 Enforcing 才生效；命中后交给 SELinux 决定 */
+	/* 域白名单仅在 SELinux Enforcing 才生效；命中后交给 SELinux 决定 */
 	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
 		return 0;
 
@@ -412,12 +425,15 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	rdev = inode->i_rdev;
 
+	/* 域白名单（仅 Enforcing）→ 交给 SELinux */
 	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
 		return 0;
 
+	/* 分区白名单 → 交给 SELinux */
 	if (likely(allow_has(rdev)))
 		return 0;
 
+	/* 首次反查命中 → 交给 SELinux */
 	if (unlikely(!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev)))
 		return 0;
 
