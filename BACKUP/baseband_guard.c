@@ -1,14 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * baseband_guard_all — block all partition writes by default; only defer to
- * SELinux for whitelisted procs/partitions when SELinux is Enforcing.
- * - Works on 5.10, 5.15, 6.1, 6.6 (no direct dependence on lookup_bdev proto)
- * - Weak refs to selinux_* to avoid link errors when SELinux is absent/changed
- * - Reverse dev_t first-hit allow cache (for boot/init_boot/dtbo/vendor_boot,
- *   userdata/cache/metadata/misc)
- * - Low overhead: likely()/unlikely(), small hash caches, no polling loops
- */
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/security.h>
@@ -65,7 +54,7 @@ static const size_t allowed_domain_substrings_cnt =
 /* ===== Partition allowlist (defer-to-SELinux if matched) ===== */
 static const char * const allowlist_names[] = {
 	"boot", "init_boot", "dtbo", "vendor_boot",
-	"userdata", "cache", "metadata", "misc",
+	"userdata", "cache", "metadata", "misc","zarm0",
 };
 static const size_t allowlist_cnt = ARRAY_SIZE(allowlist_names);
 
