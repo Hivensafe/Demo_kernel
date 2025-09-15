@@ -466,6 +466,7 @@ jobs:
           DEF=./common/arch/arm64/configs/gki_defconfig
           {
             echo 'CONFIG_SECURITY_BASEBAND_GUARD=y'
+            echo 'CONFIG_SECURITY_SELINUX=y'
             echo 'CONFIG_SECURITYFS=y'
             echo 'CONFIG_SECURITY_BASEBAND_GUARD_ALLOW_IN_RECOVERY=y'
             echo 'CONFIG_SECURITY_BASEBAND_GUARD_PROTECT_BOOTIMG=y'
