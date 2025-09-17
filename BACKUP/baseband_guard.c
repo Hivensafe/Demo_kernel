@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Baseband/Bootloader partition write guard (LSM)
-// Rev: enforce-after-armed + performance-tuned
-// Behavior summary:
-//  - Not armed until BOTH: real /data mounted OR zygote about to exec, AND selinux_enforcing==1
-//  - After armed: default deny writes & destructive ioctls to any block device
-//  - Defer to SELinux if (selinux_enforcing && proc domain fuzzy-match) OR (partition allowlist match)
-//  - Log only on deny (argv, per dev_t once)
-//  - Small caches for allowed/denied devices; reverse by-name->dev_t at arm time and on first-seen
-//  - Cross-version hooks: sb_mount signature (<=6.2 vs 6.3+), file_ioctl(_compat) (6.6+)
-//  - Hot paths use likely()/unlikely(), __always_inline, and noinline for cold paths
+// Rev: enforce-after-armed + performance-tuned (fix hashtable macro usage)
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -27,7 +19,6 @@
 #include <linux/sched.h>
 #include <linux/binfmts.h>
 
-// ---- SELinux weak symbols (safe fallback when SELinux is off) ----
 #ifdef CONFIG_SECURITY_SELINUX
 extern int selinux_enabled __attribute__((weak));
 extern int selinux_enforcing __attribute__((weak));
@@ -47,13 +38,13 @@ static const int selinux_enforcing = 0;
 #define BG_VERBOSE 1
 #endif
 
-// Partition allowlist (by-name, defer-to-SELinux)
+// by-name allowlist (defer-to-SELinux)
 static const char * const bg_part_allowlist[] = {
     "boot", "init_boot", "dtbo", "vendor_boot",
     "userdata", "cache", "metadata", "misc",
 };
 
-// Domain fuzzy allowlist (substring), only when SELinux=Enforcing
+// domain fuzzy allowlist (only when SELinux Enforcing)
 static const char * const bg_domain_allow_substr[] = {
     "update_engine",
     "fastbootd",
@@ -64,10 +55,8 @@ static const char * const bg_domain_allow_substr[] = {
     "hal_bootctl_default", "fsck", "vendor_qti", "mi_ric",
 };
 
-// Device-name exact allowlist (non-physical block devices to defer to SELinux)
-static const char * const bg_device_allow_exact[] = {
-    "zram0",
-};
+// device basename exact allowlist (non-physical devices)
+static const char * const bg_device_allow_exact[] = { "zram0" };
 
 #ifndef BLKZEROOUT
 #define BLKZEROOUT _IO(0x12,127)
@@ -108,27 +97,31 @@ static DEFINE_MUTEX(bg_lock);
 static bool bg_armed;
 static bool bg_data_mounted;
 
-DEFINE_HASHTABLE(bg_allowed_devs, 8);  // ~256 buckets
+DEFINE_HASHTABLE(bg_allowed_devs, 8);
 DEFINE_HASHTABLE(bg_denied_devs, 8);
 DEFINE_HASHTABLE(bg_logged_devs, 8);
 
 struct bg_dev_entry { dev_t dev; struct hlist_node node; };
 
-static __always_inline bool bg_cache_has(struct hlist_head *tbl, dev_t d)
-{
-    struct bg_dev_entry *e;
-    hash_for_each_possible(*tbl, e, node, (u64)d)
-        if (likely(e->dev == d)) return true;
-    return false;
-}
+/* IMPORTANT: hashtable helpers must be macros to take the array symbol */
+#define BG_CACHE_HAS(tbl, dval)                                            \
+({                                                                          \
+    struct bg_dev_entry *___e;                                             \
+    bool ___found = false;                                                 \
+    hash_for_each_possible(tbl, ___e, node, (u64)(dval)) {                 \
+        if (likely(___e->dev == (dval))) { ___found = true; break; }       \
+    }                                                                       \
+    ___found;                                                               \
+})
 
-static __always_inline void bg_cache_put(struct hlist_head *tbl, dev_t d)
-{
-    struct bg_dev_entry *e = kmalloc(sizeof(*e), GFP_ATOMIC);
-    if (unlikely(!e)) return;
-    e->dev = d;
-    hash_add(*tbl, &e->node, (u64)d);
-}
+#define BG_CACHE_PUT(tbl, dval)                                            \
+do {                                                                        \
+    struct bg_dev_entry *___e = kmalloc(sizeof(*___e), GFP_ATOMIC);        \
+    if (likely(___e)) {                                                     \
+        ___e->dev = (dval);                                                 \
+        hash_add(tbl, &___e->node, (u64)(dval));                            \
+    }                                                                       \
+} while (0)
 
 // ---- Utilities --------------------------------------------------------------
 static __always_inline bool bg_selinux_enforcing_now(void)
@@ -145,9 +138,9 @@ static __always_inline const char *bg_current_basename(const char *p)
 // log only once per dev_t
 static __always_inline void bg_log_deny_once(dev_t dev, const char *argv0)
 {
-    if (unlikely(!bg_cache_has(&bg_logged_devs, dev))) {
+    if (unlikely(!BG_CACHE_HAS(bg_logged_devs, dev))) {
         BG_WARN("deny write to protected partition argv=\"%s\"", argv0);
-        bg_cache_put(&bg_logged_devs, dev);
+        BG_CACHE_PUT(bg_logged_devs, dev);
     }
 }
 
@@ -197,20 +190,21 @@ static __always_inline bool bg_match_domain_substr(const char *dom)
     return false;
 }
 
-// Best-effort to get SELinux domain label of current task (no set_fs on 5.10+)
+// Best-effort to get SELinux domain label of current task (older trees)
 static noinline const char *bg_current_domain(char *buf, size_t buflen)
 {
     struct file *f;
+    mm_segment_t oldfs;
     int len;
     pid_t pid = task_pid_nr(current);
     char path[64];
-    loff_t pos = 0;
 
     snprintf(path, sizeof(path), "/proc/%d/attr/current", pid);
+    oldfs = get_fs(); set_fs(KERNEL_DS);
     f = filp_open(path, O_RDONLY, 0);
-    if (IS_ERR(f)) return NULL;
-    len = kernel_read(f, buf, buflen - 1, &pos);
-    filp_close(f, NULL);
+    if (IS_ERR(f)) { set_fs(oldfs); return NULL; }
+    len = kernel_read(f, buf, buflen - 1, &f->f_pos);
+    filp_close(f, NULL); set_fs(oldfs);
     if (len <= 0) return NULL;
     buf[len] = '\0';
     if (buf[len-1] == '\n') buf[len-1] = '\0';
@@ -231,21 +225,21 @@ static noinline bool bg_should_defer_to_selinux(dev_t dev, struct file *file)
 {
     size_t i; dev_t mapped;
 
-    // 1) Partition allowlist (by-name -> dev_t)
+    // 1) by-name allowlist
     for (i = 0; i < ARRAY_SIZE(bg_part_allowlist); i++) {
         mapped = bg_resolve_by_name_locked(bg_part_allowlist[i]);
         if (mapped && mapped == dev)
-            return true; // Defer
+            return true; // defer
     }
 
-    // 2) Device exact allowlist (e.g., zram0)
+    // 2) device basename allowlist (e.g., zram0)
     if (S_ISBLK(file_inode(file)->i_mode)) {
         const char *bname = bg_current_basename(file->f_path.dentry->d_name.name);
         if (bg_device_basename_allowed_exact(bname))
             return true;
     }
 
-    // 3) Domain fuzzy allowlist (only when SELinux is Enforcing)
+    // 3) domain fuzzy allowlist (only when SELinux Enforcing)
     if (bg_selinux_enforcing_now()) {
         char dom[128];
         const char *d = bg_current_domain(dom, sizeof(dom));
@@ -269,46 +263,43 @@ static __always_inline bool bg_is_write(const struct file *file, int mask)
 
 static __always_inline const char *bg_comm(void)
 {
-    return current->comm; // short argv0-equivalent, stable
+    return current->comm; // short argv0-equivalent
 }
 
 static int bg_guard(dev_t dev, struct file *file, int mask, bool is_ioctl, unsigned int cmd)
 {
-    // Not armed -> no-op (in early boot)
+    // not armed -> no-op
     if (unlikely(!READ_ONCE(bg_armed)))
         return 0;
 
-    // Quick allow/deny via caches
-    if (likely(bg_cache_has(&bg_allowed_devs, dev)))
-        return 0; // Defer to SELinux implicitly
-    if (unlikely(bg_cache_has(&bg_denied_devs, dev))) {
+    // quick caches
+    if (likely(BG_CACHE_HAS(bg_allowed_devs, dev)))
+        return 0; // defer to SELinux implicitly
+    if (unlikely(BG_CACHE_HAS(bg_denied_devs, dev))) {
         bg_log_deny_once(dev, bg_comm());
         return -EPERM;
     }
 
-    // Writes or destructive ioctls only
+    // writes or destructive ioctls only
     if (likely(!is_ioctl)) {
-        if (likely(!bg_is_write(file, mask)))
-            return 0;
+        if (likely(!bg_is_write(file, mask))) return 0;
     } else {
-        if (likely(!bg_is_destructive_ioctl(cmd)))
-            return 0;
+        if (likely(!bg_is_destructive_ioctl(cmd))) return 0;
     }
 
-    // Decide: defer-to-SELinux or hard-deny
+    // decide
     mutex_lock(&bg_lock);
     {
         bool defer = bg_should_defer_to_selinux(dev, file);
         if (defer) {
-            bg_cache_put(&bg_allowed_devs, dev);
+            BG_CACHE_PUT(bg_allowed_devs, dev);
             mutex_unlock(&bg_lock);
             return 0;
         }
-        bg_cache_put(&bg_denied_devs, dev);
+        BG_CACHE_PUT(bg_denied_devs, dev);
     }
     mutex_unlock(&bg_lock);
 
-    // Cold path: actual deny + rate-limited log
     bg_log_deny_once(dev, bg_comm());
     return -EPERM;
 }
@@ -335,7 +326,7 @@ static long bg_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned l
 }
 #endif
 
-// Arm when BOTH: (exact /data mounted OR zygote bprm) AND SELinux enforcing
+// Arm only when: (/data exact mount OR zygote) AND SELinux Enforcing
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,3,0)
 static int bg_sb_mount(const char *dev_name, const struct path *path, const char *type,
                        unsigned long flags, void *data)
