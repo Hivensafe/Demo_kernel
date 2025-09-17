@@ -39,6 +39,19 @@ on:
         default: true
         type: boolean
 
+      enable_feature_a:
+        description: "开启SerialID校验"
+        required: false
+        default: true
+        type: boolean
+
+      enable_feature_c:
+        description: "开启LSM防格机"
+        required: false
+        default: true
+        type: boolean
+      
+
       enable_feature_b:
          description: "选择网络调度"
          required: false
@@ -241,7 +254,8 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Patch main.c (cat拼接soc0 serial_number panic校验)
+      - name: Add SerialID Check (添加SerialID校验)
+        if: ${{inputs.enable_feature_a }}
         working-directory: kernel_workspace/kernel_platform/common
         run: |
           # 防重复 patch
@@ -257,6 +271,11 @@ jobs:
           mv init/main.c.patched init/main.c
           echo "已自动插入 serialid_check.c 到 main.c"
 
+          
+      - name: Add baseband_guard_module (添加security防格机模块)
+        if: ${{inputs.enable_feature_c }}
+        working-directory: kernel_workspace/kernel_platform/common
+        run: |
           cp "${GITHUB_WORKSPACE}/BACKUP/baseband_guard.c" ./security/baseband_guard.c
           set -euo pipefail
           # 0) 位置自检
