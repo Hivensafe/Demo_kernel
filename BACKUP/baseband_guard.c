@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Baseband/Bootloader partition write guard (LSM)
-// Rev: enforce-after-armed + performance-tuned (fix hashtable macro usage)
+// Rev: enforce-after-armed + perf-tuned (Linux 6.6 ready)
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -9,16 +9,16 @@
 #include <linux/fs.h>
 #include <linux/namei.h>
 #include <linux/version.h>
-#include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/hashtable.h>
-#include <linux/cred.h>
-#include <linux/ctype.h>
 #include <linux/mutex.h>
-#include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/binfmts.h>
+#include <linux/err.h>
+#include <linux/string.h>
+#include <linux/cred.h>
 
+/* ---------- SELinux externs (weak) ---------- */
 #ifdef CONFIG_SECURITY_SELINUX
 extern int selinux_enabled __attribute__((weak));
 extern int selinux_enforcing __attribute__((weak));
@@ -27,8 +27,8 @@ static const int selinux_enabled = 0;
 static const int selinux_enforcing = 0;
 #endif
 
-#define BG_TAG           "baseband_guard"
-#define BG_LOG(fmt, ...) pr_info(BG_TAG ": " fmt "\n", ##__VA_ARGS__)
+#define BG_TAG "baseband_guard"
+#define BG_LOG(fmt, ...)  pr_info(BG_TAG ": " fmt "\n", ##__VA_ARGS__)
 #define BG_WARN(fmt, ...) pr_warn(BG_TAG ": " fmt "\n", ##__VA_ARGS__)
 #define BG_ERR(fmt, ...)  pr_err(BG_TAG ": " fmt "\n", ##__VA_ARGS__)
 
@@ -38,26 +38,22 @@ static const int selinux_enforcing = 0;
 #define BG_VERBOSE 1
 #endif
 
-// by-name allowlist (defer-to-SELinux)
+/* ---------- policy allowlists ---------- */
 static const char * const bg_part_allowlist[] = {
-    "boot", "init_boot", "dtbo", "vendor_boot",
-    "userdata", "cache", "metadata", "misc",
+    "boot","init_boot","dtbo","vendor_boot",
+    "userdata","cache","metadata","misc",
 };
 
-// domain fuzzy allowlist (only when SELinux Enforcing)
 static const char * const bg_domain_allow_substr[] = {
-    "update_engine",
-    "fastbootd",
-    "recovery",
-    "rmt_storage",
-    // vendor variations
-    "oplus", "oppo", "feature", "swap", "system_perf_init",
-    "hal_bootctl_default", "fsck", "vendor_qti", "mi_ric",
+    "update_engine","fastbootd","recovery","rmt_storage",
+    /* vendor variations */
+    "oplus","oppo","feature","swap","system_perf_init",
+    "hal_bootctl_default","fsck","vendor_qti","mi_ric",
 };
 
-// device basename exact allowlist (non-physical devices)
 static const char * const bg_device_allow_exact[] = { "zram0" };
 
+/* ---------- BLK destructive ioctls ---------- */
 #ifndef BLKZEROOUT
 #define BLKZEROOUT _IO(0x12,127)
 #endif
@@ -92,10 +88,9 @@ static __always_inline bool bg_is_destructive_ioctl(unsigned int cmd)
     }
 }
 
-// ---- State & caches ---------------------------------------------------------
+/* ---------- state & caches ---------- */
 static DEFINE_MUTEX(bg_lock);
 static bool bg_armed;
-static bool bg_data_mounted;
 
 DEFINE_HASHTABLE(bg_allowed_devs, 8);
 DEFINE_HASHTABLE(bg_denied_devs, 8);
@@ -103,27 +98,27 @@ DEFINE_HASHTABLE(bg_logged_devs, 8);
 
 struct bg_dev_entry { dev_t dev; struct hlist_node node; };
 
-/* IMPORTANT: hashtable helpers must be macros to take the array symbol */
-#define BG_CACHE_HAS(tbl, dval)                                            \
-({                                                                          \
-    struct bg_dev_entry *___e;                                             \
-    bool ___found = false;                                                 \
-    hash_for_each_possible(tbl, ___e, node, (u64)(dval)) {                 \
-        if (likely(___e->dev == (dval))) { ___found = true; break; }       \
-    }                                                                       \
-    ___found;                                                               \
+/* NOTE: use macros so hashtable param is the ARRAY symbol (not pointer) */
+#define BG_CACHE_HAS(tbl, dval)                                                \
+({                                                                              \
+    struct bg_dev_entry *___e;                                                 \
+    bool ___found = false;                                                     \
+    hash_for_each_possible(tbl, ___e, node, (u64)(dval)) {                     \
+        if (likely(___e->dev == (dval))) { ___found = true; break; }           \
+    }                                                                           \
+    ___found;                                                                   \
 })
 
-#define BG_CACHE_PUT(tbl, dval)                                            \
-do {                                                                        \
-    struct bg_dev_entry *___e = kmalloc(sizeof(*___e), GFP_ATOMIC);        \
-    if (likely(___e)) {                                                     \
-        ___e->dev = (dval);                                                 \
-        hash_add(tbl, &___e->node, (u64)(dval));                            \
-    }                                                                       \
+#define BG_CACHE_PUT(tbl, dval)                                                \
+do {                                                                            \
+    struct bg_dev_entry *___e = kmalloc(sizeof(*___e), GFP_ATOMIC);            \
+    if (likely(___e)) {                                                         \
+        ___e->dev = (dval);                                                     \
+        hash_add(tbl, &___e->node, (u64)(dval));                                \
+    }                                                                           \
 } while (0)
 
-// ---- Utilities --------------------------------------------------------------
+/* ---------- utils ---------- */
 static __always_inline bool bg_selinux_enforcing_now(void)
 {
     return likely(selinux_enabled == 1) && likely(selinux_enforcing == 1);
@@ -135,7 +130,6 @@ static __always_inline const char *bg_current_basename(const char *p)
     return s ? s + 1 : p;
 }
 
-// log only once per dev_t
 static __always_inline void bg_log_deny_once(dev_t dev, const char *argv0)
 {
     if (unlikely(!BG_CACHE_HAS(bg_logged_devs, dev))) {
@@ -144,7 +138,7 @@ static __always_inline void bg_log_deny_once(dev_t dev, const char *argv0)
     }
 }
 
-// Resolve /dev/block/by-name/<part> to dev_t
+/* /dev/block/by-name/<part> -> dev_t */
 static noinline dev_t bg_resolve_by_name_locked(const char *name)
 {
     char path[128];
@@ -162,6 +156,7 @@ static noinline dev_t bg_resolve_by_name_locked(const char *name)
     return dev;
 }
 
+/* exact /data match */
 static noinline bool bg_is_exact_data_path(const struct path *path)
 {
     char *buf = NULL, *abspath = NULL;
@@ -190,21 +185,32 @@ static __always_inline bool bg_match_domain_substr(const char *dom)
     return false;
 }
 
-// Best-effort to get SELinux domain label of current task (older trees)
+/* read current task's SELinux domain label (no set_fs on 5.10+) */
 static noinline const char *bg_current_domain(char *buf, size_t buflen)
 {
     struct file *f;
-    mm_segment_t oldfs;
     int len;
     pid_t pid = task_pid_nr(current);
     char path[64];
 
     snprintf(path, sizeof(path), "/proc/%d/attr/current", pid);
-    oldfs = get_fs(); set_fs(KERNEL_DS);
     f = filp_open(path, O_RDONLY, 0);
-    if (IS_ERR(f)) { set_fs(oldfs); return NULL; }
-    len = kernel_read(f, buf, buflen - 1, &f->f_pos);
-    filp_close(f, NULL); set_fs(oldfs);
+    if (IS_ERR(f)) return NULL;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+    {
+        loff_t pos = 0;
+        len = kernel_read(f, buf, buflen - 1, &pos);
+    }
+#else
+    {
+        mm_segment_t oldfs = get_fs();
+        set_fs(KERNEL_DS);
+        len = kernel_read(f, buf, buflen - 1, &f->f_pos);
+        set_fs(oldfs);
+    }
+#endif
+    filp_close(f, NULL);
     if (len <= 0) return NULL;
     buf[len] = '\0';
     if (buf[len-1] == '\n') buf[len-1] = '\0';
@@ -220,26 +226,26 @@ static __always_inline bool bg_device_basename_allowed_exact(const char *bname)
     return false;
 }
 
-// ---- Policy decisions -------------------------------------------------------
+/* ---------- policy decision ---------- */
 static noinline bool bg_should_defer_to_selinux(dev_t dev, struct file *file)
 {
     size_t i; dev_t mapped;
 
-    // 1) by-name allowlist
+    /* 1) by-name allowlist */
     for (i = 0; i < ARRAY_SIZE(bg_part_allowlist); i++) {
         mapped = bg_resolve_by_name_locked(bg_part_allowlist[i]);
         if (mapped && mapped == dev)
-            return true; // defer
+            return true;
     }
 
-    // 2) device basename allowlist (e.g., zram0)
+    /* 2) device exact allowlist (e.g., zram0) */
     if (S_ISBLK(file_inode(file)->i_mode)) {
         const char *bname = bg_current_basename(file->f_path.dentry->d_name.name);
         if (bg_device_basename_allowed_exact(bname))
             return true;
     }
 
-    // 3) domain fuzzy allowlist (only when SELinux Enforcing)
+    /* 3) domain fuzzy allowlist (only when SELinux=Enforcing) */
     if (bg_selinux_enforcing_now()) {
         char dom[128];
         const char *d = bg_current_domain(dom, sizeof(dom));
@@ -249,10 +255,10 @@ static noinline bool bg_should_defer_to_selinux(dev_t dev, struct file *file)
     return false;
 }
 
-static __always_inline bool bg_is_write(const struct file *file, int mask)
+static __always_inline bool bg_is_write(const struct file *f, int mask)
 {
 #ifdef FMODE_WRITE
-    if (likely((mask & MAY_WRITE) || (file->f_mode & FMODE_WRITE)))
+    if (likely((mask & MAY_WRITE) || (f->f_mode & FMODE_WRITE)))
         return true;
 #else
     if (likely(mask & MAY_WRITE))
@@ -263,31 +269,30 @@ static __always_inline bool bg_is_write(const struct file *file, int mask)
 
 static __always_inline const char *bg_comm(void)
 {
-    return current->comm; // short argv0-equivalent
+    return current->comm;
 }
 
+/* ---------- guard ---------- */
 static int bg_guard(dev_t dev, struct file *file, int mask, bool is_ioctl, unsigned int cmd)
 {
-    // not armed -> no-op
     if (unlikely(!READ_ONCE(bg_armed)))
         return 0;
 
-    // quick caches
     if (likely(BG_CACHE_HAS(bg_allowed_devs, dev)))
-        return 0; // defer to SELinux implicitly
+        return 0;
     if (unlikely(BG_CACHE_HAS(bg_denied_devs, dev))) {
         bg_log_deny_once(dev, bg_comm());
         return -EPERM;
     }
 
-    // writes or destructive ioctls only
     if (likely(!is_ioctl)) {
-        if (likely(!bg_is_write(file, mask))) return 0;
+        if (likely(!bg_is_write(file, mask)))
+            return 0;
     } else {
-        if (likely(!bg_is_destructive_ioctl(cmd))) return 0;
+        if (likely(!bg_is_destructive_ioctl(cmd)))
+            return 0;
     }
 
-    // decide
     mutex_lock(&bg_lock);
     {
         bool defer = bg_should_defer_to_selinux(dev, file);
@@ -304,51 +309,43 @@ static int bg_guard(dev_t dev, struct file *file, int mask, bool is_ioctl, unsig
     return -EPERM;
 }
 
-// ---- Hooks ------------------------------------------------------------------
-static int bg_file_permission(struct file *file, int mask)
+/* ---------- hooks ---------- */
+static int bg_file_permission(struct file *f, int mask)
 {
-    struct inode *inode = file_inode(file);
-    if (unlikely(!S_ISBLK(inode->i_mode))) return 0;
-    return bg_guard(inode->i_rdev, file, mask, false, 0);
+    struct inode *i = file_inode(f);
+    if (unlikely(!S_ISBLK(i->i_mode))) return 0;
+    return bg_guard(i->i_rdev, f, mask, false, 0);
 }
 
-static long bg_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+static long bg_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
-    struct inode *inode = file_inode(file);
-    if (unlikely(!S_ISBLK(inode->i_mode))) return 0;
-    return bg_guard(inode->i_rdev, file, 0, true, cmd);
+    struct inode *i = file_inode(f);
+    if (unlikely(!S_ISBLK(i->i_mode))) return 0;
+    return bg_guard(i->i_rdev, f, 0, true, cmd);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
-static long bg_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned long arg)
+static long bg_file_ioctl_compat(struct file *f, unsigned int cmd, unsigned long arg)
 {
-    return bg_file_ioctl(file, cmd, arg);
+    return bg_file_ioctl(f, cmd, arg);
 }
 #endif
 
-// Arm only when: (/data exact mount OR zygote) AND SELinux Enforcing
+/* Arm only when: (/data exact mount OR zygote) AND SELinux Enforcing */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,3,0)
-static int bg_sb_mount(const char *dev_name, const struct path *path, const char *type,
-                       unsigned long flags, void *data)
+static int bg_sb_mount(const char *dev_name, const struct path *path,
+                       const char *type, unsigned long flags, void *data)
 #else
-static int bg_sb_mount(const char *dev_name, struct path *path, const char *type,
-                       unsigned long flags, void *data)
+static int bg_sb_mount(const char *dev_name, struct path *path,
+                       const char *type, unsigned long flags, void *data)
 #endif
 {
     if (unlikely(!READ_ONCE(bg_armed))) {
-        bool is_data = bg_is_exact_data_path(path);
-        if (is_data) {
-            WRITE_ONCE(bg_data_mounted, true);
-            if (bg_selinux_enforcing_now()) {
-                WRITE_ONCE(bg_armed, true);
+        if (bg_selinux_enforcing_now() && path && bg_is_exact_data_path(path)) {
+            WRITE_ONCE(bg_armed, true);
 #if BG_VERBOSE
-                BG_LOG("armed=1 selinux=1 reason=data_mount");
+            BG_LOG("armed=1 selinux=1 reason=data_mount");
 #endif
-            } else {
-#if BG_VERBOSE
-                BG_LOG("data mounted but selinux!=enforcing; keep unarmed");
-#endif
-            }
         }
     }
     return 0;
@@ -358,15 +355,11 @@ static int bg_bprm_check_security(struct linux_binprm *bprm)
 {
     const char *bn = bprm->filename ? bg_current_basename(bprm->filename) : NULL;
     if (unlikely(!READ_ONCE(bg_armed) && bn)) {
-        if (unlikely(!strcmp(bn, "app_process32") || !strcmp(bn, "app_process64"))) {
+        if (!strcmp(bn, "app_process32") || !strcmp(bn, "app_process64")) {
             if (bg_selinux_enforcing_now()) {
                 WRITE_ONCE(bg_armed, true);
 #if BG_VERBOSE
                 BG_LOG("armed=1 selinux=1 reason=zygote");
-#endif
-            } else {
-#if BG_VERBOSE
-                BG_LOG("zygote seen but selinux!=enforcing; keep unarmed");
 #endif
             }
         }
@@ -375,16 +368,16 @@ static int bg_bprm_check_security(struct linux_binprm *bprm)
 }
 
 static struct security_hook_list bg_hooks[] __lsm_ro_after_init = {
-    LSM_HOOK_INIT(file_permission, bg_file_permission),
-    LSM_HOOK_INIT(file_ioctl,      bg_file_ioctl),
+    LSM_HOOK_INIT(file_permission,     bg_file_permission),
+    LSM_HOOK_INIT(file_ioctl,          bg_file_ioctl),
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
-    LSM_HOOK_INIT(file_ioctl_compat, bg_file_ioctl_compat),
+    LSM_HOOK_INIT(file_ioctl_compat,   bg_file_ioctl_compat),
 #endif
-    LSM_HOOK_INIT(sb_mount,        bg_sb_mount),
+    LSM_HOOK_INIT(sb_mount,            bg_sb_mount),
     LSM_HOOK_INIT(bprm_check_security, bg_bprm_check_security),
 };
 
-// ---- Init -------------------------------------------------------------------
+/* ---------- init ---------- */
 static int __init baseband_guard_init(void)
 {
     hash_init(bg_allowed_devs);
@@ -403,4 +396,4 @@ DEFINE_LSM(baseband_guard) = {
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Baseband/Bootloader partition write guard (LSM)");
-MODULE_AUTHOR("秋刀鱼 & contributors");
+MODULE_AUTHOR("秋刀鱼");
