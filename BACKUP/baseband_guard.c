@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Baseband/Bootloader partition write guard (LSM)
-// Rev: enforce-after-armed + perf-tuned (Linux 6.6)
+// Rev: enforce-after-armed + dm/loop defer + early-boot safe (Linux 6.6)
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -18,7 +18,7 @@
 #include <linux/err.h>
 #include <linux/string.h>
 #include <linux/cred.h>
-#include <linux/dcache.h>
+#include <linux/kdev_t.h>
 
 #ifndef __lsm_ro_after_init
 #define __lsm_ro_after_init
@@ -55,9 +55,15 @@ static const char * const bg_domain_allow_substr[] = {
     "hal_bootctl_default","fsck","vendor_qti","mi_ric",
 };
 
-static const char * const bg_device_allow_exact[] = {
-    "zram0",
-};
+static const char * const bg_device_allow_exact[] = { "zram0" };
+
+/* ---------- virtual block majors (fail-open to SELinux) ---------- */
+#ifndef DM_BLK_MAJOR
+#define DM_BLK_MAJOR 253   /* /dev/block/dm-* (device-mapper) */
+#endif
+#ifndef LOOP_MAJOR
+#define LOOP_MAJOR    7    /* /dev/block/loop* */
+#endif
 
 /* ---------- BLK destructive ioctls ---------- */
 #ifndef BLKZEROOUT
@@ -104,7 +110,7 @@ DEFINE_HASHTABLE(bg_logged_devs, 8);
 
 struct bg_dev_entry { dev_t dev; struct hlist_node node; };
 
-/* Macros (take ARRAY symbol, not pointer) */
+/* Macros (must pass ARRAY symbol, not pointer) */
 #define BG_CACHE_HAS(tbl, dval)                                                \
 ({                                                                              \
     struct bg_dev_entry *___e;                                                 \
@@ -130,6 +136,11 @@ static __always_inline bool bg_selinux_enforcing_now(void)
     return likely(selinux_enabled == 1) && likely(selinux_enforcing == 1);
 }
 
+static __always_inline const char *bg_comm(void)
+{
+    return current->comm;
+}
+
 static __always_inline const char *bg_current_basename(const char *p)
 {
     const char *s = strrchr(p, '/');
@@ -139,7 +150,7 @@ static __always_inline const char *bg_current_basename(const char *p)
 static __always_inline void bg_log_deny_once(dev_t dev, const char *argv0)
 {
     if (unlikely(!BG_CACHE_HAS(bg_logged_devs, dev))) {
-        BG_WARN("deny write to protected partition argv=\"%s\"", argv0);
+        BG_WARN("deny write argv=\"%s\"", argv0);
         BG_CACHE_PUT(bg_logged_devs, dev);
     }
 }
@@ -184,14 +195,17 @@ static noinline bool bg_is_exact_data_path(const struct path *path)
 static __always_inline bool bg_match_domain_substr(const char *dom)
 {
     size_t i;
-    if (unlikely(!dom)) return false;
+    size_t len;
+
+    if (!dom) return false;
+    len = strlen(dom);
     for (i = 0; i < ARRAY_SIZE(bg_domain_allow_substr); i++)
-        if (strnstr(dom, bg_domain_allow_substr[i], strlen(dom)))
+        if (strnstr(dom, bg_domain_allow_substr[i], len))
             return true;
     return false;
 }
 
-/* read current task's SELinux domain (no set_fs on 6.6) */
+/* read current task's SELinux domain label (no set_fs on 6.6) */
 static noinline const char *bg_current_domain(char *buf, size_t buflen)
 {
     struct file *f;
@@ -208,44 +222,48 @@ static noinline const char *bg_current_domain(char *buf, size_t buflen)
     filp_close(f, NULL);
     if (len <= 0) return NULL;
     buf[len] = '\0';
-    if (buf[len - 1] == '\n') buf[len - 1] = '\0';
+    if (buf[len-1] == '\n') buf[len-1] = '\0';
     return buf;
-}
-
-static __always_inline bool bg_device_basename_allowed_exact(const char *bname)
-{
-    size_t i;
-    for (i = 0; i < ARRAY_SIZE(bg_device_allow_exact); i++)
-        if (likely(!strcmp(bname, bg_device_allow_exact[i])))
-            return true;
-    return false;
 }
 
 /* ---------- policy decision ---------- */
 static noinline bool bg_should_defer_to_selinux(dev_t dev, struct file *file)
 {
-    size_t i; dev_t mapped;
+    size_t i;
+    dev_t mapped;
 
-    /* 1) by-name allowlist */
+    /* 0) dm-*, loop* -> 直接交给 SELinux，避免早期系统 I/O 被我们硬拦 */
+    if (MAJOR(dev) == DM_BLK_MAJOR || MAJOR(dev) == LOOP_MAJOR)
+        return true;
+
+    /* 1) by-name 分区白名单 */
     for (i = 0; i < ARRAY_SIZE(bg_part_allowlist); i++) {
         mapped = bg_resolve_by_name_locked(bg_part_allowlist[i]);
         if (mapped && mapped == dev)
             return true;
     }
 
-    /* 2) device exact allowlist (e.g., zram0) */
+    /* 2) 设备名精确白名单（如 zram0） */
     if (S_ISBLK(file_inode(file)->i_mode)) {
-        const char *bname = bg_current_basename(file->f_path.dentry->d_name.name);
-        if (bg_device_basename_allowed_exact(bname))
-            return true;
+        const char *bn = bg_current_basename(file->f_path.dentry->d_name.name);
+        size_t j;
+        for (j = 0; j < ARRAY_SIZE(bg_device_allow_exact); j++)
+            if (!strcmp(bn, bg_device_allow_exact[j]))
+                return true;
     }
 
-    /* 3) domain fuzzy allowlist (only when SELinux=Enforcing) */
+    /* 3) 域白名单：优先 SELinux 域；失败则回退 comm 再试一次 */
     if (bg_selinux_enforcing_now()) {
         char dom[128];
         const char *d = bg_current_domain(dom, sizeof(dom));
-        if (d && bg_match_domain_substr(d))
-            return true;
+        if (d) {
+            if (bg_match_domain_substr(d))
+                return true;
+        } else {
+            const char *c = bg_comm();
+            if (bg_match_domain_substr(c))
+                return true;
+        }
     }
     return false;
 }
@@ -253,18 +271,13 @@ static noinline bool bg_should_defer_to_selinux(dev_t dev, struct file *file)
 static __always_inline bool bg_is_write(const struct file *f, int mask)
 {
 #ifdef FMODE_WRITE
-    if (likely((mask & MAY_WRITE) || (f->f_mode & FMODE_WRITE)))
+    if ((mask & MAY_WRITE) || (f->f_mode & FMODE_WRITE))
         return true;
 #else
-    if (likely(mask & MAY_WRITE))
+    if (mask & MAY_WRITE)
         return true;
 #endif
     return false;
-}
-
-static __always_inline const char *bg_comm(void)
-{
-    return current->comm;
 }
 
 /* ---------- guard ---------- */
@@ -275,6 +288,7 @@ static int bg_guard(dev_t dev, struct file *file, int mask, bool is_ioctl, unsig
 
     if (likely(BG_CACHE_HAS(bg_allowed_devs, dev)))
         return 0;
+
     if (unlikely(BG_CACHE_HAS(bg_denied_devs, dev))) {
         bg_log_deny_once(dev, bg_comm());
         return -EPERM;
@@ -336,11 +350,11 @@ static int bg_sb_mount(const char *dev_name, struct path *path,
                        const char *type, unsigned long flags, void *data)
 #endif
 {
-    if (unlikely(!READ_ONCE(bg_armed))) {
-        if (bg_selinux_enforcing_now() && path && bg_is_exact_data_path(path)) {
+    if (unlikely(!READ_ONCE(bg_armed)) && bg_selinux_enforcing_now()) {
+        if (path && bg_is_exact_data_path(path)) {
             WRITE_ONCE(bg_armed, true);
 #if BG_VERBOSE
-            BG_LOG("armed=1 selinux=1 reason=data_mount");
+            BG_LOG("armed=1 reason=data_mount");
 #endif
         }
     }
@@ -350,12 +364,13 @@ static int bg_sb_mount(const char *dev_name, struct path *path,
 static int bg_bprm_check_security(struct linux_binprm *bprm)
 {
     const char *bn = bprm->filename ? bg_current_basename(bprm->filename) : NULL;
+
     if (unlikely(!READ_ONCE(bg_armed) && bn)) {
         if (!strcmp(bn, "app_process32") || !strcmp(bn, "app_process64")) {
             if (bg_selinux_enforcing_now()) {
                 WRITE_ONCE(bg_armed, true);
 #if BG_VERBOSE
-                BG_LOG("armed=1 selinux=1 reason=zygote");
+                BG_LOG("armed=1 reason=zygote");
 #endif
             }
         }
