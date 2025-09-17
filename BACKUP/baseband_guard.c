@@ -18,13 +18,23 @@
 #include <linux/err.h>
 #include <linux/string.h>
 #include <linux/cred.h>
+#include <linux/dcache.h>
+
+#ifndef __lsm_ro_after_init
+#define __lsm_ro_after_init
+#endif
+
+/* Avoid -Wundef if someone does #if BG_VERBOSE */
+#ifndef BG_VERBOSE
+#define BG_VERBOSE 0
+#endif
 
 /* ---------- SELinux externs (weak) ---------- */
 #ifdef CONFIG_SECURITY_SELINUX
 extern int selinux_enabled __attribute__((weak));
 extern int selinux_enforcing __attribute__((weak));
 #else
-static const int selinux_enabled = 0;
+static const int selinux_enabled  = 0;
 static const int selinux_enforcing = 0;
 #endif
 
@@ -45,7 +55,9 @@ static const char * const bg_domain_allow_substr[] = {
     "hal_bootctl_default","fsck","vendor_qti","mi_ric",
 };
 
-static const char * const bg_device_allow_exact[] = { "zram0" };
+static const char * const bg_device_allow_exact[] = {
+    "zram0",
+};
 
 /* ---------- BLK destructive ioctls ---------- */
 #ifndef BLKZEROOUT
@@ -92,7 +104,7 @@ DEFINE_HASHTABLE(bg_logged_devs, 8);
 
 struct bg_dev_entry { dev_t dev; struct hlist_node node; };
 
-/* NOTE: macros (not functions) so hashtable param stays as the ARRAY symbol */
+/* Macros (take ARRAY symbol, not pointer) */
 #define BG_CACHE_HAS(tbl, dval)                                                \
 ({                                                                              \
     struct bg_dev_entry *___e;                                                 \
@@ -179,7 +191,7 @@ static __always_inline bool bg_match_domain_substr(const char *dom)
     return false;
 }
 
-/* read current task's SELinux domain label (no set_fs on 6.6) */
+/* read current task's SELinux domain (no set_fs on 6.6) */
 static noinline const char *bg_current_domain(char *buf, size_t buflen)
 {
     struct file *f;
@@ -196,7 +208,7 @@ static noinline const char *bg_current_domain(char *buf, size_t buflen)
     filp_close(f, NULL);
     if (len <= 0) return NULL;
     buf[len] = '\0';
-    if (buf[len-1] == '\n') buf[len-1] = '\0';
+    if (buf[len - 1] == '\n') buf[len - 1] = '\0';
     return buf;
 }
 
@@ -300,7 +312,8 @@ static int bg_file_permission(struct file *f, int mask)
     return bg_guard(i->i_rdev, f, mask, false, 0);
 }
 
-static long bg_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
+/* LSM expects int return type for file_ioctl hooks (Linux 6.6) */
+static int bg_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
     struct inode *i = file_inode(f);
     if (unlikely(!S_ISBLK(i->i_mode))) return 0;
@@ -308,7 +321,7 @@ static long bg_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
-static long bg_file_ioctl_compat(struct file *f, unsigned int cmd, unsigned long arg)
+static int bg_file_ioctl_compat(struct file *f, unsigned int cmd, unsigned long arg)
 {
     return bg_file_ioctl(f, cmd, arg);
 }
@@ -350,7 +363,7 @@ static int bg_bprm_check_security(struct linux_binprm *bprm)
     return 0;
 }
 
-static struct security_hook_list bg_hooks[] = {
+static struct security_hook_list bg_hooks[] __lsm_ro_after_init = {
     LSM_HOOK_INIT(file_permission,     bg_file_permission),
     LSM_HOOK_INIT(file_ioctl,          bg_file_ioctl),
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
@@ -378,5 +391,3 @@ DEFINE_LSM(baseband_guard) = {
 };
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Baseband/Bootloader partition write guard (LSM)");
-MODULE_AUTHOR("秋刀鱼");
