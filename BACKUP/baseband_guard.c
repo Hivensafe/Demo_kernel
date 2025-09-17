@@ -1,18 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * baseband_guard_all (gated & enforcing-aware)
- *
- * Arming condition (must satisfy SELinux Enforcing):
- *   - EITHER: precise mountpoint "/data" has been mounted AND SELinux=Enforcing
- *   - OR: zygote (app_process32/64) is about to exec AND SELinux=Enforcing
- *
- * Before arming: do NOTHING (no interception).
- * After  arming: block all partition writes by default; allowlists (proc/partition)
- *                only defer to SELinux if Enforcing (to prevent Permissive+spoof bypass).
- *
- * Kernel: 5.10 / 5.15 / 6.1 / 6.6
- * - by-name -> dev_t via kern_path (no lookup_bdev proto dependency)
- * - weak refs to selinux_* (avoid link errors if SELinux not built)
+ * baseband_guard_all (gated)
+ * - Do NOTHING (no interception) until either /data is mounted
+ *   or zygote is about to exec.
+ * - After armed: block ALL partition writes by default; only defer to SELinux
+ *   for whitelisted procs/partitions WHEN SELinux is Enforcing.
+ * - Works on 5.10, 5.15, 6.1, 6.6 (no lookup_bdev proto dependency).
+ * - Weak refs to selinux_* to avoid link errors if SELinux symbols absent.
  */
 
 #include <linux/module.h>
@@ -34,7 +28,6 @@
 #include <linux/param.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
-#include <linux/dcache.h>
 
 #define BB_ENFORCING 1
 
@@ -49,7 +42,7 @@
 
 #define BB_BYNAME_DIR "/dev/block/by-name"
 
-/* ===== 进程“域”白名单（子串匹配；仅在 SELinux=Enforcing 时生效并交由 SELinux 决定） ===== */
+/* ===== 进程域白名单（子串匹配，只有 Enforcing 时才生效，交给 SELinux 裁决） ===== */
 static const char * const allowed_domain_substrings[] = {
 	"update_engine",
 	"fastbootd",
@@ -75,7 +68,7 @@ static const char * const allowlist_names[] = {
 };
 static const size_t allowlist_cnt = ARRAY_SIZE(allowlist_names);
 
-/* ===== 槽后缀（开机算一次） ===== */
+/* ===== 槽后缀（开机算一次即可） ===== */
 extern char *saved_command_line;
 static const char *bbg_slot_suffix;
 
@@ -91,7 +84,7 @@ static __always_inline const char *slot_suffix_from_cmdline_once(void)
 	return NULL;
 }
 
-/* ===== by-name -> dev_t（5.10~6.6 通用） ===== */
+/* ===== by-name -> dev_t（5.10~6.6 通用，不依赖 lookup_bdev 原型） ===== */
 static __always_inline bool resolve_byname_dev(const char *name, dev_t *out)
 {
 	char *path;
@@ -145,7 +138,7 @@ static __always_inline void allow_add(dev_t dev)
 #endif
 }
 
-/* ===== deny-seen dev_t（避免重复反查）===== */
+/* ===== deny-seen dev_t（避免反查重复消耗）===== */
 struct seen_node { dev_t dev; struct hlist_node h; };
 DEFINE_HASHTABLE(denied_seen, 8);
 
@@ -167,7 +160,7 @@ static __always_inline void denied_seen_add(dev_t dev)
 	hash_add(denied_seen, &n->h, (u64)dev);
 }
 
-/* ===== allowlist dev_t 解析（含 _a/_b/slot）===== */
+/* ===== allowlist dev_t 解析（含 _a/_b/slot 后缀）===== */
 static __always_inline bool is_allowed_partition_dev_resolve(dev_t cur)
 {
 	size_t i; dev_t dev;
@@ -213,9 +206,9 @@ static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 	return false;
 }
 
-/* ===== SELinux Enforcing（弱符号）===== */
+/* ===== SELinux Enforcing（弱符号，避免链接失败）===== */
 #ifdef CONFIG_SECURITY_SELINUX
-extern int selinux_enabled  __attribute__((weak));
+extern int selinux_enabled __attribute__((weak));
 extern int selinux_enforcing __attribute__((weak));
 #endif
 
@@ -232,7 +225,7 @@ static __always_inline bool selinux_is_enforcing_now(void)
 #endif
 }
 
-/* ===== 当前进程域是否在白名单（SID 上次命中缓存）===== */
+/* ===== 当前进程域是否在白名单（缓存上一个 SID）===== */
 #ifdef CONFIG_SECURITY_SELINUX
 static u32 sid_cache_last;
 static bool sid_cache_last_ok;
@@ -264,7 +257,7 @@ static __always_inline bool current_domain_allowed_fast(void)
 #endif
 }
 
-/* ===== 日志（只输出 argv）===== */
+/* ===== 日志（仅输出 argv）===== */
 static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 {
 	int n, i;
@@ -294,7 +287,7 @@ static __cold noinline void bbg_log_deny_detail(const char *why, unsigned int cm
 static __cold noinline int deny(const char *why, struct file *file, unsigned int cmd_opt)
 {
 	if (!BB_ENFORCING) return 0;
-	/* per-dev 限流：避免刷屏（每个 dev_t 只打 1 次） */
+	/* per-dev 限流：避免刷屏 */
 	if (file) {
 		struct inode *inode = file_inode(file);
 		static DEFINE_HASHTABLE(denied_logged, 8);
@@ -344,7 +337,7 @@ static __always_inline bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
-/* ===== arming：只在 “条件满足且 SELinux=Enforcing” 时触发 ===== */
+/* ===== 启用门闩：/data 挂载 或 zygote 即将 exec ===== */
 static atomic_t bbg_armed = ATOMIC_INIT(0);
 
 static __always_inline bool bbg_is_armed(void)
@@ -358,7 +351,7 @@ static void bbg_arm_and_build_allow_cache_once(void)
 	if (bbg_is_armed()) return;
 	atomic_set(&bbg_armed, 1);
 
-	/* 预解析 allowlist 分区，减少后续反查开销 */
+	/* 预解析 allowlist 分区，减少后续反查成本 */
 	for (i = 0; i < allowlist_cnt; i++) {
 		const char *n = allowlist_names[i];
 		if (resolve_byname_dev(n, &d)) { allow_add(d); continue; }
@@ -374,33 +367,11 @@ static void bbg_arm_and_build_allow_cache_once(void)
 		}
 	}
 #if BB_VERBOSE
-	bb_pr("armed (allow cache primed)\n");
+	bb_pr("armed after readiness, allow cache primed\n");
 #endif
 }
 
-/* 精确判断 mountpoint 是否为 "/data"（使用 d_path，仅 mount 发生时调用，成本可接受） */
-static bool path_is_exact_data_mount(const struct path *path)
-{
-	char *buf, *p;
-	bool is_data = false;
-
-	if (!path) return false;
-
-	/* 2KB 足够容纳常见 mount 路径 */
-	buf = kmalloc(2048, GFP_ATOMIC);
-	if (!buf) return false;
-
-	p = d_path(path, buf, 2048);
-	if (!IS_ERR(p)) {
-		/* 要求全字符串精确等于 "/data" */
-		if (strcmp(p, "/data") == 0)
-			is_data = true;
-	}
-	kfree(buf);
-	return is_data;
-}
-
-/* sb_mount：仅在 mountpoint 精确为 "/data" 且 SELinux=Enforcing 时 arm */
+/* sb_mount 钩子：观察 /data 挂载即 arm */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,3,0)
 static int bbg_sb_mount(const char *dev_name, const struct path *path,
 			const char *type, unsigned long flags, void *data)
@@ -409,14 +380,17 @@ static int bbg_sb_mount(const char *dev_name, struct path *path,
 			const char *type, unsigned long flags, void *data)
 #endif
 {
-	if (!bbg_is_armed() && selinux_is_enforcing_now()) {
-		if (path && path_is_exact_data_mount(path))
+	const char *mp = NULL;
+	if (path && path->dentry) {
+		/* 轻量判断：匹配挂载点最后一段名为 "data" 即认为 /data 就绪 */
+		mp = path->dentry->d_name.name;
+		if (mp && strcmp(mp, "data") == 0)
 			bbg_arm_and_build_allow_cache_once();
 	}
 	return 0;
 }
 
-/* zygote 预执行：仅在 SELinux=Enforcing 且命中 zygote 可执行时 arm */
+/* zygote 预执行：观察到 app_process32/64 即 arm */
 static const char *zygote_candidates[] = {
 	"/system/bin/app_process64",
 	"/system/bin/app_process32",
@@ -431,9 +405,6 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	if (!bprm || !bprm->filename) return 0;
 	if (bbg_is_armed()) return 0;
 
-	if (!selinux_is_enforcing_now())
-		return 0;
-
 	path = bprm->filename;
 	for (i = 0; i < ZYGOTE_CAND_CNT; i++) {
 		if (strcmp(path, zygote_candidates[i]) == 0) {
@@ -444,7 +415,7 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	return 0;
 }
 
-/* ===== Enforcement（仅 armed 后生效）===== */
+/* ===== Enforcement hooks（仅 armed 后生效）===== */
 
 static int bb_file_permission(struct file *file, int mask)
 {
@@ -461,11 +432,11 @@ static int bb_file_permission(struct file *file, int mask)
 
 	rdev = inode->i_rdev;
 
-	/* 仅在 SELinux=Enforcing 且 域白名单命中时放行（交由 SELinux）*/
+	/* 只有 Enforcing + 域命中时放行（交给 SELinux）*/
 	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
 		return 0;
 
-	/* 分区 allowlist 命中 → 交由 SELinux */
+	/* 分区 allowlist 命中 → 交给 SELinux */
 	if (likely(allow_has(rdev)))
 		return 0;
 
@@ -530,7 +501,7 @@ static int __init bbg_init(void)
 {
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
 	bbg_slot_suffix = slot_suffix_from_cmdline_once();
-	pr_info("baseband_guard_all: gated by (/data mounted && Enforcing) OR (zygote && Enforcing)\n");
+	pr_info("baseband_guard_all (gated by /data or zygote; SELinux-enforcing-aware allow)\n");
 	return 0;
 }
 
@@ -539,6 +510,6 @@ DEFINE_LSM(baseband_guard) = {
 	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("Gated all-partition write guard: arm only when SELinux=Enforcing and device is ready (/data) or zygote");
+MODULE_DESCRIPTION("Gated all-partition write guard: arm after /data mount or zygote; defer allow to SELinux when Enforcing");
 MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
