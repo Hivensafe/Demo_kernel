@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 // Baseband/Bootloader partition write guard (LSM)
-// Rev: enforce-after-armed + perf-tuned (Linux 6.6 ready)
+// Rev: enforce-after-armed + perf-tuned (Linux 6.6)
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/lsm_hooks.h>
 #include <linux/blkdev.h>
 #include <linux/fs.h>
@@ -30,13 +31,6 @@ static const int selinux_enforcing = 0;
 #define BG_TAG "baseband_guard"
 #define BG_LOG(fmt, ...)  pr_info(BG_TAG ": " fmt "\n", ##__VA_ARGS__)
 #define BG_WARN(fmt, ...) pr_warn(BG_TAG ": " fmt "\n", ##__VA_ARGS__)
-#define BG_ERR(fmt, ...)  pr_err(BG_TAG ": " fmt "\n", ##__VA_ARGS__)
-
-#ifndef CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE
-#define BG_VERBOSE 0
-#else
-#define BG_VERBOSE 1
-#endif
 
 /* ---------- policy allowlists ---------- */
 static const char * const bg_part_allowlist[] = {
@@ -98,7 +92,7 @@ DEFINE_HASHTABLE(bg_logged_devs, 8);
 
 struct bg_dev_entry { dev_t dev; struct hlist_node node; };
 
-/* NOTE: use macros so hashtable param is the ARRAY symbol (not pointer) */
+/* NOTE: macros (not functions) so hashtable param stays as the ARRAY symbol */
 #define BG_CACHE_HAS(tbl, dval)                                                \
 ({                                                                              \
     struct bg_dev_entry *___e;                                                 \
@@ -156,7 +150,7 @@ static noinline dev_t bg_resolve_by_name_locked(const char *name)
     return dev;
 }
 
-/* exact /data match */
+/* exact /data match for sb_mount */
 static noinline bool bg_is_exact_data_path(const struct path *path)
 {
     char *buf = NULL, *abspath = NULL;
@@ -185,31 +179,20 @@ static __always_inline bool bg_match_domain_substr(const char *dom)
     return false;
 }
 
-/* read current task's SELinux domain label (no set_fs on 5.10+) */
+/* read current task's SELinux domain label (no set_fs on 6.6) */
 static noinline const char *bg_current_domain(char *buf, size_t buflen)
 {
     struct file *f;
     int len;
     pid_t pid = task_pid_nr(current);
     char path[64];
+    loff_t pos = 0;
 
     snprintf(path, sizeof(path), "/proc/%d/attr/current", pid);
     f = filp_open(path, O_RDONLY, 0);
     if (IS_ERR(f)) return NULL;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
-    {
-        loff_t pos = 0;
-        len = kernel_read(f, buf, buflen - 1, &pos);
-    }
-#else
-    {
-        mm_segment_t oldfs = get_fs();
-        set_fs(KERNEL_DS);
-        len = kernel_read(f, buf, buflen - 1, &f->f_pos);
-        set_fs(oldfs);
-    }
-#endif
+    len = kernel_read(f, buf, buflen - 1, &pos);
     filp_close(f, NULL);
     if (len <= 0) return NULL;
     buf[len] = '\0';
@@ -367,7 +350,7 @@ static int bg_bprm_check_security(struct linux_binprm *bprm)
     return 0;
 }
 
-static struct security_hook_list bg_hooks[] __lsm_ro_after_init = {
+static struct security_hook_list bg_hooks[] = {
     LSM_HOOK_INIT(file_permission,     bg_file_permission),
     LSM_HOOK_INIT(file_ioctl,          bg_file_ioctl),
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
