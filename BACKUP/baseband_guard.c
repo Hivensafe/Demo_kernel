@@ -24,13 +24,17 @@
 #include <linux/namei.h>
 #include <linux/printk.h>
 #include <linux/ratelimit.h>
-#include <linux/genhd.h>
 #include <linux/mount.h>
 #include <linux/binfmts.h>
 #include <linux/hashtable.h>
 #include <linux/dcache.h>
 #include <linux/atomic.h>
 #include <linux/delay.h>
+
+// 条件性包含 genhd.h（如果可用）
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+#include <linux/genhd.h>
+#endif
 
 // 配置选项
 #ifdef CONFIG_SECURITY_BASEBAND_GUARD_VERBOSE
@@ -92,7 +96,7 @@ struct dev_cache {
 };
 
 #define CACHE_SIZE 32
-static DEFINE_HASHTABLE(allowed_devs, ilog2(CACHE_SIZE));
+static DEFINE_HAShtABLE(allowed_devs, ilog2(CACHE_SIZE));
 static DEFINE_HASHTABLE(denied_seen, ilog2(CACHE_SIZE));
 static DEFINE_HASHTABLE(denied_logged, ilog2(CACHE_SIZE));
 static DEFINE_SPINLOCK(cache_lock);
