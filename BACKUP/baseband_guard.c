@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * baseband_guard_all (gated)
- * - Do NOTHING (no interception) until either /data is mounted
- *   or zygote is about to exec.
- * - After armed: block ALL partition writes by default; only defer to SELinux
- *   for whitelisted procs/partitions WHEN SELinux is Enforcing.
- * - Works on 5.10, 5.15, 6.1, 6.6 (no lookup_bdev proto dependency).
- * - Weak refs to selinux_* to avoid link errors if SELinux symbols absent.
+ * - Do NOTHING until /data is mounted or zygote is about to exec.
+ * - After armed: default-deny writes to ALL block devices; defer to SELinux
+ *   on whitelisted procs/partitions ONLY when SELinux is Enforcing.
+ * - Compatible with 5.10, 5.15, 6.1, 6.6.
  */
 
 #include <linux/module.h>
@@ -42,7 +40,7 @@
 
 #define BB_BYNAME_DIR "/dev/block/by-name"
 
-/* ===== 进程域白名单（子串匹配，只有 Enforcing 时才生效，交给 SELinux 裁决） ===== */
+/* ===== Process SELinux domain allow (substring; only when Enforcing) ===== */
 static const char * const allowed_domain_substrings[] = {
 	"update_engine",
 	"fastbootd",
@@ -61,15 +59,15 @@ static const char * const allowed_domain_substrings[] = {
 static const size_t allowed_domain_substrings_cnt =
 	ARRAY_SIZE(allowed_domain_substrings);
 
-/* ===== 分区 allowlist（命中则 defer-to-SELinux）===== */
+/* ===== Partition allowlist (defer-to-SELinux if matched) ===== */
 static const char * const allowlist_names[] = {
 	"boot", "init_boot", "dtbo", "vendor_boot",
 	"userdata", "cache", "metadata", "misc",
 };
 static const size_t allowlist_cnt = ARRAY_SIZE(allowlist_names);
 
-/* ===== 槽后缀（开机算一次即可） ===== */
-extern char *saved_command_line;
+/* ===== Slot suffix (computed once) ===== */
+extern char *saved_command_line; /* common kernels expose this */
 static const char *bbg_slot_suffix;
 
 static __always_inline const char *slot_suffix_from_cmdline_once(void)
@@ -84,7 +82,7 @@ static __always_inline const char *slot_suffix_from_cmdline_once(void)
 	return NULL;
 }
 
-/* ===== by-name -> dev_t（5.10~6.6 通用，不依赖 lookup_bdev 原型） ===== */
+/* ===== by-name -> dev_t (works 5.10~6.6; no lookup_bdev proto deps) ===== */
 static __always_inline bool resolve_byname_dev(const char *name, dev_t *out)
 {
 	char *path;
@@ -113,9 +111,9 @@ static __always_inline bool resolve_byname_dev(const char *name, dev_t *out)
 	return true;
 }
 
-/* ===== allow dev_t 缓存 ===== */
+/* ===== allow dev_t cache ===== */
 struct allow_node { dev_t dev; struct hlist_node h; };
-DEFINE_HASHTABLE(allowed_devs, 8);
+DEFINE_HASHTABLE(allowed_devs, 8); /* 256 buckets */
 
 static __always_inline bool allow_has(dev_t dev)
 {
@@ -138,7 +136,7 @@ static __always_inline void allow_add(dev_t dev)
 #endif
 }
 
-/* ===== deny-seen dev_t（避免反查重复消耗）===== */
+/* ===== deny-seen dev_t cache (avoid repeated reverse lookups) ===== */
 struct seen_node { dev_t dev; struct hlist_node h; };
 DEFINE_HASHTABLE(denied_seen, 8);
 
@@ -160,7 +158,7 @@ static __always_inline void denied_seen_add(dev_t dev)
 	hash_add(denied_seen, &n->h, (u64)dev);
 }
 
-/* ===== allowlist dev_t 解析（含 _a/_b/slot 后缀）===== */
+/* ===== is in allowlist (with _a/_b/slot variants) ===== */
 static __always_inline bool is_allowed_partition_dev_resolve(dev_t cur)
 {
 	size_t i; dev_t dev;
@@ -198,7 +196,7 @@ static __always_inline bool is_allowed_partition_dev_resolve(dev_t cur)
 	return false;
 }
 
-/* 首写反查（仅 armed 后才会运行） */
+/* first-write reverse match & cache (only after armed) */
 static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 {
 	if (!cur) return false;
@@ -206,7 +204,7 @@ static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 	return false;
 }
 
-/* ===== SELinux Enforcing（弱符号，避免链接失败）===== */
+/* ===== SELinux enforcing (weak refs to avoid link errors) ===== */
 #ifdef CONFIG_SECURITY_SELINUX
 extern int selinux_enabled __attribute__((weak));
 extern int selinux_enforcing __attribute__((weak));
@@ -225,7 +223,7 @@ static __always_inline bool selinux_is_enforcing_now(void)
 #endif
 }
 
-/* ===== 当前进程域是否在白名单（缓存上一个 SID）===== */
+/* ===== current domain allowed (cache last SID) ===== */
 #ifdef CONFIG_SECURITY_SELINUX
 static u32 sid_cache_last;
 static bool sid_cache_last_ok;
@@ -257,7 +255,7 @@ static __always_inline bool current_domain_allowed_fast(void)
 #endif
 }
 
-/* ===== 日志（仅输出 argv）===== */
+/* ===== logging: only argv (per-dev once) ===== */
 static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 {
 	int n, i;
@@ -287,7 +285,7 @@ static __cold noinline void bbg_log_deny_detail(const char *why, unsigned int cm
 static __cold noinline int deny(const char *why, struct file *file, unsigned int cmd_opt)
 {
 	if (!BB_ENFORCING) return 0;
-	/* per-dev 限流：避免刷屏 */
+	/* per-dev once limit */
 	if (file) {
 		struct inode *inode = file_inode(file);
 		static DEFINE_HASHTABLE(denied_logged, 8);
@@ -309,7 +307,7 @@ out_log:
 	return -EPERM;
 }
 
-/* ===== 破坏性 ioctl 判定 ===== */
+/* ===== destructive ioctls ===== */
 static __always_inline bool is_destructive_ioctl(unsigned int cmd)
 {
 	switch (cmd) {
@@ -337,7 +335,7 @@ static __always_inline bool is_destructive_ioctl(unsigned int cmd)
 	}
 }
 
-/* ===== 启用门闩：/data 挂载 或 zygote 即将 exec ===== */
+/* ===== gating: arm when /data mounted OR zygote about to exec ===== */
 static atomic_t bbg_armed = ATOMIC_INIT(0);
 
 static __always_inline bool bbg_is_armed(void)
@@ -351,7 +349,6 @@ static void bbg_arm_and_build_allow_cache_once(void)
 	if (bbg_is_armed()) return;
 	atomic_set(&bbg_armed, 1);
 
-	/* 预解析 allowlist 分区，减少后续反查成本 */
 	for (i = 0; i < allowlist_cnt; i++) {
 		const char *n = allowlist_names[i];
 		if (resolve_byname_dev(n, &d)) { allow_add(d); continue; }
@@ -371,7 +368,7 @@ static void bbg_arm_and_build_allow_cache_once(void)
 #endif
 }
 
-/* sb_mount 钩子：观察 /data 挂载即 arm */
+/* sb_mount: see /data mounted then arm */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,3,0)
 static int bbg_sb_mount(const char *dev_name, const struct path *path,
 			const char *type, unsigned long flags, void *data)
@@ -382,7 +379,6 @@ static int bbg_sb_mount(const char *dev_name, struct path *path,
 {
 	const char *mp = NULL;
 	if (path && path->dentry) {
-		/* 轻量判断：匹配挂载点最后一段名为 "data" 即认为 /data 就绪 */
 		mp = path->dentry->d_name.name;
 		if (mp && strcmp(mp, "data") == 0)
 			bbg_arm_and_build_allow_cache_once();
@@ -390,7 +386,7 @@ static int bbg_sb_mount(const char *dev_name, struct path *path,
 	return 0;
 }
 
-/* zygote 预执行：观察到 app_process32/64 即 arm */
+/* bprm_check_security: zygote about to exec then arm */
 static const char *zygote_candidates[] = {
 	"/system/bin/app_process64",
 	"/system/bin/app_process32",
@@ -415,13 +411,12 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	return 0;
 }
 
-/* ===== Enforcement hooks（仅 armed 后生效）===== */
+/* ===== enforcement hooks (only after armed) ===== */
 
 static int bb_file_permission(struct file *file, int mask)
 {
 	struct inode *inode; dev_t rdev;
 
-	/* 未 armed：完全不介入 */
 	if (likely(!bbg_is_armed())) return 0;
 
 	if (likely(!(mask & MAY_WRITE))) return 0;
@@ -432,19 +427,19 @@ static int bb_file_permission(struct file *file, int mask)
 
 	rdev = inode->i_rdev;
 
-	/* 只有 Enforcing + 域命中时放行（交给 SELinux）*/
+	/* Enforcing + domain allowed => let SELinux decide (we abstain) */
 	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
 		return 0;
 
-	/* 分区 allowlist 命中 → 交给 SELinux */
+	/* allowlist partitions => let SELinux decide */
 	if (likely(allow_has(rdev)))
 		return 0;
 
-	/* 首写反查命中 → 缓存并 defer */
+	/* first-hit reverse allow => cache then defer */
 	if (unlikely(!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev)))
 		return 0;
 
-	/* 默认拒绝 */
+	/* default deny */
 	denied_seen_add(rdev);
 	return deny("write to protected partition", file, 0);
 }
@@ -453,7 +448,6 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode; dev_t rdev;
 
-	/* 未 armed：完全不介入 */
 	if (likely(!bbg_is_armed())) return 0;
 
 	if (unlikely(!file)) return 0;
@@ -486,14 +480,14 @@ static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned lo
 #define BB_HAVE_IOCTL_COMPAT 1
 #endif
 
-/* ===== LSM 注册 ===== */
+/* ===== LSM registration ===== */
 static struct security_hook_list bb_hooks[] = {
-	LSM_HOOK_INIT(file_permission,   bb_file_permission),
-	LSM_HOOK_INIT(file_ioctl,        bb_file_ioctl),
+	LSM_HOOK_INIT(file_permission,     bb_file_permission),
+	LSM_HOOK_INIT(file_ioctl,          bb_file_ioctl),
 #ifdef BB_HAVE_IOCTL_COMPAT
-	LSM_HOOK_INIT(file_ioctl_compat, bb_file_ioctl_compat),
+	LSM_HOOK_INIT(file_ioctl_compat,   bb_file_ioctl_compat),
 #endif
-	LSM_HOOK_INIT(sb_mount,          bbg_sb_mount),
+	LSM_HOOK_INIT(sb_mount,            bbg_sb_mount),
 	LSM_HOOK_INIT(bprm_check_security, bbg_bprm_check_security),
 };
 
@@ -501,7 +495,7 @@ static int __init bbg_init(void)
 {
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
 	bbg_slot_suffix = slot_suffix_from_cmdline_once();
-	pr_info("baseband_guard_all (gated by /data or zygote; SELinux-enforcing-aware allow)\n");
+	pr_info("baseband_guard_all (gated by /data or zygote; Enforcing-aware allow; no early interception)\n");
 	return 0;
 }
 
