@@ -34,8 +34,8 @@
 #include <linux/param.h>
 
 #define BB_ENFORCING 1
-
 #define BB_BYNAME_DIR "/dev/block/by-name"
+
 #define bb_pr(fmt, ...)    pr_info("baseband_guard: " fmt, ##__VA_ARGS__)
 #define bb_pr_rl(fmt, ...) pr_info_ratelimited("baseband_guard: " fmt, ##__VA_ARGS__)
 
@@ -83,7 +83,7 @@ static const char *slot_suffix_from_cmdline_once(void)
 	return NULL;
 }
 
-/* ===== resolve by-name -> dev_t (works 5.10~6.6; no lookup_bdev prototype issues) ===== */
+/* ===== resolve by-name -> dev_t (works 5.10~6.6) ===== */
 static __always_inline bool resolve_byname_dev(const char *name, dev_t *out)
 {
 	char *path;
@@ -134,7 +134,7 @@ static __always_inline void allow_add(dev_t dev)
 	hash_add(allowed_devs, &n->h, (u64)dev);
 }
 
-/* ===== deny-seen dev_t cache (avoid repeated reverse lookups when blocked) ===== */
+/* ===== deny-seen dev_t cache ===== */
 struct seen_node { dev_t dev; struct hlist_node h; };
 DEFINE_HASHTABLE(denied_seen, 8);
 
@@ -235,7 +235,8 @@ static __always_inline bool current_domain_allowed_fast(bool *out_enforcing, con
 
 	if (sid && sid == sid_cache_last) {
 		ok = sid_cache_last_ok;
-		goto done_ctx; /* no ctx string in cache path */
+		if (out_ctx) *out_ctx = NULL;
+		return ok;
 	}
 
 	if (sid && !security_secid_to_secctx(sid, &ctx, &len) && ctx && len) {
@@ -249,11 +250,6 @@ static __always_inline bool current_domain_allowed_fast(bool *out_enforcing, con
 	sid_cache_last_ok = ok;
 
 	if (out_ctx) *out_ctx = ctx ? ctx : NULL;
-
-	return ok;
-
-done_ctx:
-	if (out_ctx) *out_ctx = NULL;
 	return ok;
 #else
 	if (out_enforcing) *out_enforcing = false;
@@ -326,6 +322,13 @@ static bool is_data_mounted_once(void)
 	return false;
 }
 
+static bool is_current_zygote_comm(void)
+{
+	char comm[TASK_COMM_LEN];
+	get_task_comm(comm, current);
+	return (!strcmp(comm, "app_process64") || !strcmp(comm, "app_process32"));
+}
+
 static void bbg_poll_worker(struct work_struct *ws)
 {
 	if (bbg_ready) return;
@@ -336,10 +339,7 @@ static void bbg_poll_worker(struct work_struct *ws)
 		return;
 	}
 
-	/* zygote presence: detect by comm (lightweight) */
-	if (task_active_pid_ns(current) && current->comm &&
-	    (!strcmp(current->comm, "app_process64") ||
-	     !strcmp(current->comm, "app_process32"))) {
+	if (is_current_zygote_comm()) {
 		bbg_ready = true;
 		pr_info("baseband_guard: zygote detected (pid=%d)\n", current->pid);
 		return;
@@ -363,7 +363,7 @@ static int bb_file_permission(struct file *file, int mask)
 
 	rdev = inode->i_rdev;
 
-	/* Domain allow：仅在 Enforcing 生效；命中则完全 defer 给 SELinux */
+	/* Domain allow：仅在 Enforcing 生效；命中则完全交给 SELinux */
 	{
 		bool enforcing = selinux_is_enforcing_now();
 		if (enforcing) {
@@ -372,14 +372,14 @@ static int bb_file_permission(struct file *file, int mask)
 		}
 	}
 
-	/* Partition allow：命中则 defer 给 SELinux */
+	/* Partition allow：命中则交给 SELinux */
 	if (allow_has(rdev)) return 0;
 
-	/* 首遇 dev_t：若反查到允许分区，缓存并 defer */
+	/* 首遇 dev_t：若反查到允许分区，缓存并交给 SELinux */
 	if (!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev))
 		return 0;
 
-	/* 其它情况：拦截 */
+	/* 其它情况：拦截并打印详细日志 */
 	denied_seen_add(rdev);
 	return deny("write to protected partition", 0);
 }
