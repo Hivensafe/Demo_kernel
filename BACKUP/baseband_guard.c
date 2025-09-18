@@ -186,20 +186,27 @@ static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 	return false;
 }
 
-/* ===== SELinux enforcing + domain whitelist ===== */
+/* ===== SELinux enforcing + domain whitelist =====
+ * 使用弱符号，避免链接期 undefined（不同树没导出这两个变量时仍可编过）。
+ */
 #ifdef CONFIG_SECURITY_SELINUX
-extern int selinux_enforcing;
-extern int selinux_enabled;
+extern int selinux_enabled   __attribute__((weak));
+extern int selinux_enforcing __attribute__((weak));
+#endif
 
 static __always_inline bool selinux_is_enforcing_now(void)
 {
+#ifdef CONFIG_SECURITY_SELINUX
+	/* 若符号未导出，&selinux_enabled 为 NULL；此时认为非 enforcing（返回 false） */
+	if (!(&selinux_enabled) || !(&selinux_enforcing))
+		return false;
 	if (!READ_ONCE(selinux_enabled))
 		return false;
 	return READ_ONCE(selinux_enforcing) != 0;
-}
 #else
-static __always_inline bool selinux_is_enforcing_now(void) { return false; }
+	return false;
 #endif
+}
 
 #ifdef CONFIG_SECURITY_SELINUX
 static u32 sid_cache_last;
@@ -304,12 +311,15 @@ static int bb_file_permission(struct file *file, int mask)
 
 	rdev = inode->i_rdev;
 
+	/* 仅在 SELinux 严格时启用域放行；否则不放行以防伪装 */
 	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
 		return 0;
 
+	/* 分区白名单 → 交给 SELinux 决定（不提前投“允许票”之外的特殊放行） */
 	if (likely(allow_has(rdev)))
 		return 0;
 
+	/* 首次见到该 dev：若命中白名单则缓存并 defer */
 	if (unlikely(!denied_seen_has(rdev) && reverse_allow_match_and_cache(rdev)))
 		return 0;
 
@@ -358,6 +368,7 @@ static int bb_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	rdev = inode->i_rdev;
 
+	/* 同上：仅在严格模式时允许“域放行” */
 	if (unlikely(selinux_is_enforcing_now() && current_domain_allowed_fast()))
 		return 0;
 
@@ -426,7 +437,7 @@ static int __init bbg_init(void)
 	security_add_hooks(bb_hooks, ARRAY_SIZE(bb_hooks), "baseband_guard");
 
 	bbg_slot_suffix = slot_suffix_from_cmdline_once();
-	pr_info("baseband_guard (diagnostic log build: deny logs + /data + zygote)\n");
+	pr_info("baseband_guard (diagnostic log build: every deny prints enforcing/domain/argv; /data&zygote poll)\n");
 
 	INIT_DELAYED_WORK(&bbg_diag_work, bbg_diag_fn);
 	schedule_delayed_work(&bbg_diag_work, HZ/2);
@@ -439,6 +450,6 @@ DEFINE_LSM(baseband_guard) = {
 	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("Protect partitions with SELinux-aware process allowlist, with diagnostic logging");
+MODULE_DESCRIPTION("Protect partitions with SELinux-aware process allowlist, with diagnostic logging (weak SELinux gate)");
 MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
