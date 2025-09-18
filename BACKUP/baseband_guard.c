@@ -1,15 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * baseband_guard_all: protect all block partitions by default; defer to SELinux
- * on allowlisted partitions / trusted processes; enable only after system ready.
- *
- *  - No SELinux kernel symbol dependency (works on 5.10 ~ 6.6).
- *  - One-shot allow-cache build after readiness (/data or zygote).
- *  - First-write reverse by-name -> dev_t match as a fallback.
- *  - Only pid + argv in logs (rate-limited; early-boot quiet).
- *  - Heavily optimized hot path (likely/unlikely, inlines, GFP_ATOMIC, hashing).
- */
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/security.h>
@@ -66,7 +54,7 @@ static const size_t allowed_comm_substrings_cnt = ARRAY_SIZE(allowed_comm_substr
 /* Keep userland workable and OEM routines happy */
 static const char * const allowlist_names[] = {
 	"boot", "init_boot", "dtbo", "vendor_boot",
-	"userdata", "cache", "metadata", "misc",
+	"userdata", "cache", "metadata", "misc","zarm0"
 };
 static const size_t allowlist_cnt = ARRAY_SIZE(allowlist_names);
 
@@ -329,7 +317,7 @@ static __always_inline bool bbg_should_log(dev_t dev)
 	return true;
 }
 
-static __cold noinline void bbg_log_deny(unsigned int cmd_opt)
+static __cold noinline void bbg_log_(unsigned int cmd_opt)
 {
 	/* Only pid + argv */
 	char buf[256];
@@ -345,10 +333,10 @@ static __cold noinline void bbg_log_deny(unsigned int cmd_opt)
 	}
 
 	if (cmd_opt)
-		pr_info_ratelimited("baseband_guard: deny (pid=%d) argv=\"%s\"\n",
+		pr_info_ratelimited("baseband_guard:  (pid=%d) argv=\"%s\"\n",
 				    current->pid, buf);
 	else
-		pr_info_ratelimited("baseband_guard: deny (pid=%d) argv=\"%s\"\n",
+		pr_info_ratelimited("baseband_guard: qdykernel deny (pid=%d) argv=\"%s\"\n",
 				    current->pid, buf);
 }
 
@@ -499,7 +487,7 @@ static int __init bbg_init(void)
 
 	bbg_boot_jiffies = jiffies;
 
-	pr_info("baseband_guard (optimized build; enabled after /data or zygote; pid+argv logs)\n");
+	pr_info("baseband_guard power by qdykernel\n");
 	return 0;
 }
 
