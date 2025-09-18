@@ -60,7 +60,7 @@ static const char * const allowed_domain_substrings[] = {
 	"vendor_qti",
 	"system_perf_init",
 	"mi_ric",
-	"oplus", "oppo", /* 厂商自带维护/诊断服务 */
+	"oplus", "oppo",
 };
 static const size_t allowed_domain_substrings_cnt =
 	ARRAY_SIZE(allowed_domain_substrings);
@@ -90,13 +90,12 @@ static __always_inline const char *slot_suffix_from_cmdline_once(void)
 
 /* ===== 弱符号：优先用安全接口拿 SELinux enforcing ===== */
 #ifdef CONFIG_SECURITY_SELINUX
-/* weak — 某些树上没有该导出符号时不会链接失败 */
 extern int security_getenforce(void) __attribute__((weak));
 #endif
 
 /* ===== 状态机 ===== */
 enum run_state { ST_IDLE = 0, ST_READY = 1, ST_ACTIVE = 2 };
-static volatile unsigned int bbg_state; /* 仅少量写，多次读 */
+static volatile unsigned int bbg_state;
 static struct delayed_work bbg_poll_work;
 static struct workqueue_struct *bbg_wq;
 static unsigned int poll_interval_ms = 500; /* 500ms 轮询 SELinux 状态 */
@@ -356,6 +355,7 @@ static __always_inline bool current_domain_allowed_fast(void)
 }
 
 /* ===== 只为诊断打印 domain/argv（非严格意义热路径，不影响性能） ===== */
+#if BB_DIAG
 static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 {
 	int n, i;
@@ -367,11 +367,12 @@ static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 	else buf[buflen - 1] = '\0';
 	return n;
 }
+#endif
 
 static __cold noinline void bbg_log_deny(dev_t dev, const char *why, unsigned int cmd_opt)
 {
 #if BB_DIAG
-	/* 打印 enforcing/domain/argv，帮助你诊断是谁在写 */
+	/* 打印 enforcing/domain/argv，帮助诊断是谁在写 */
 	char dom[96] = "?";
 #ifdef CONFIG_SECURITY_SELINUX
 	u32 sid = 0, len = 0; char *ctx = NULL;
@@ -398,7 +399,7 @@ static __cold noinline void bbg_log_deny(dev_t dev, const char *why, unsigned in
 		kfree(cmdbuf);
 	}
 #else
-	/* 生产默认：只打一条简洁日志 */
+	/* 生产默认：只打一条简洁日志（限速） */
 	pr_info_ratelimited("baseband_guard: deny %s pid=%d comm=%s\n",
 			    why, current->pid, current->comm);
 #endif
@@ -408,15 +409,6 @@ static __cold noinline void bbg_log_deny(dev_t dev, const char *why, unsigned in
 static __always_inline int deny(const char *why, struct file *file, unsigned int cmd_opt)
 {
 	if (!BB_ENFORCING) return 0;
-#if !BB_DIAG
-	/* 生产模式尽量安静：只在有需要时打印，且 ratelimited */
-	if (file) {
-		struct inode *inode = file_inode(file);
-		if (inode && S_ISBLK(inode->i_mode)) {
-			/* 这里可加“每 dev_t 限 1 次”计数器，现省略以减少分支 */
-		}
-	}
-#endif
 	bbg_log_deny(file ? file_inode(file)->i_rdev : 0, why, cmd_opt);
 	return -EPERM;
 }
@@ -554,8 +546,8 @@ static int __init bbg_init(void)
 	if (bbg_wq)
 		INIT_DELAYED_WORK(&bbg_poll_work, bbg_poll_worker);
 
-	pr_info("baseband_guard (diagnostic log build: %s; /data&zygote poll)\n",
-		BB_DIAG ? "every deny prints enforcing/domain/argv" : "quiet");
+	pr_info("baseband_guard (%s; /data&zygote poll)\n",
+		BB_DIAG ? "diagnostic log build" : "quiet build");
 
 	return 0;
 }
