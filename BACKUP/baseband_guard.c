@@ -4,7 +4,8 @@
  *
  * - Boots in IDLE: no interception to avoid early-boot false positives.
  * - Becomes READY when /data is mounted or zygote pre-exec is observed.
- * - Polls SELinux enforcing every 500ms (weak symbol + cmdline fallback).
+ * - Polls SELinux enforcing every 500ms (compile-time gated call to security_getenforce;
+ *   fallback to cmdline if unavailable).
  * - Activates only after confirming enforcing, then:
  *     * Global block for writes / destructive ioctls to block devices
  *     * Allowlist domains (substring) → defer to SELinux (return 0)
@@ -36,7 +37,7 @@
 #include <linux/sched/task.h>
 
 #define BB_ENFORCING 1
-#define BB_DIAG 0 /* 设为 1 可打开诊断期“每次拒绝都打 enforcing/domain/argv” */
+#define BB_DIAG 0 /* 诊断版日志：每次拒绝都打印 enforcing/domain/argv */
 
 #define bb_pr(fmt, ...)    pr_debug("baseband_guard: " fmt, ##__VA_ARGS__)
 #define bb_pr_rl(fmt, ...) pr_info_ratelimited("baseband_guard: " fmt, ##__VA_ARGS__)
@@ -88,17 +89,12 @@ static __always_inline const char *slot_suffix_from_cmdline_once(void)
 	return NULL;
 }
 
-/* ===== 弱符号：优先用安全接口拿 SELinux enforcing ===== */
-#ifdef CONFIG_SECURITY_SELINUX
-extern int security_getenforce(void) __attribute__((weak));
-#endif
-
 /* ===== 状态机 ===== */
 enum run_state { ST_IDLE = 0, ST_READY = 1, ST_ACTIVE = 2 };
 static volatile unsigned int bbg_state;
 static struct delayed_work bbg_poll_work;
 static struct workqueue_struct *bbg_wq;
-static unsigned int poll_interval_ms = 500; /* 500ms 轮询 SELinux 状态 */
+static unsigned int poll_interval_ms = 500; /* 500ms 轮询 SELinux 严格 */
 module_param(poll_interval_ms, uint, 0644);
 MODULE_PARM_DESC(poll_interval_ms, "Polling interval (ms) while READY");
 
@@ -219,9 +215,9 @@ static __always_inline bool reverse_allow_match_and_cache(dev_t cur)
 
 /* ===== 运行时 flags ===== */
 static bool enforcing_latched;   /* 成功确认严格模式后置 1 */
-static bool in_recovery_mode;    /* fastboot/recovery 模式下，一直停在 IDLE */
+static bool in_recovery_mode;    /* recovery/fastboot 模式下，一直停在 IDLE */
 
-/* ===== /data & zygote 观察 ===== */
+/* ===== /data & zygote 观察：推进到 READY ===== */
 static __always_inline void bbg_mark_ready(void)
 {
 	if (bbg_state == ST_IDLE) {
@@ -279,7 +275,9 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	return 0;
 }
 
-/* ===== SELinux 严格模式判断 ===== */
+/* ===== SELinux 严格模式判断（编译期选择，无弱符号，无判空 → 不产生日志 GOT/PLT） ===== */
+
+/* cmdline 兜底 */
 static __always_inline bool cmdline_enforcing(void)
 {
 	const char *p = saved_command_line;
@@ -295,18 +293,26 @@ static __always_inline bool cmdline_is_recovery(void)
 	       strstr(p, "androidboot.fastboot");
 }
 
+/* 如果内核提供 security_getenforce（典型是 CONFIG_SECURITY_SELINUX_DEVELOP），直接用；
+ * 否则退回到 cmdline 检测。这样就不会出现 GOT/PLT。 */
+#if defined(CONFIG_SECURITY_SELINUX) && defined(CONFIG_SECURITY_SELINUX_DEVELOP)
+extern int security_getenforce(void);
+static __always_inline bool se_is_enforcing_now(void)
+{
+	int e = security_getenforce();
+	return e > 0;
+}
+#else
+static __always_inline bool se_is_enforcing_now(void)
+{
+	return cmdline_enforcing();
+}
+#endif
+
 /* READY 阶段轮询：确认严格即进入 ACTIVE；recovery/fastboot 则一直保持 IDLE */
 static void bbg_poll_worker(struct work_struct *ws)
 {
-	bool enforcing = false;
-#ifdef CONFIG_SECURITY_SELINUX
-	if (security_getenforce) {
-		int e = security_getenforce();
-		enforcing = (e > 0);
-	}
-#endif
-	if (!enforcing)
-		enforcing = cmdline_enforcing();
+	bool enforcing = se_is_enforcing_now();
 
 	if (enforcing) {
 		enforcing_latched = true;
@@ -354,7 +360,7 @@ static __always_inline bool current_domain_allowed_fast(void)
 #endif
 }
 
-/* ===== 只为诊断打印 domain/argv（非严格意义热路径，不影响性能） ===== */
+/* ===== 诊断日志（可关） ===== */
 #if BB_DIAG
 static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 {
@@ -399,13 +405,11 @@ static __cold noinline void bbg_log_deny(dev_t dev, const char *why, unsigned in
 		kfree(cmdbuf);
 	}
 #else
-	/* 生产默认：只打一条简洁日志（限速） */
 	pr_info_ratelimited("baseband_guard: deny %s pid=%d comm=%s\n",
 			    why, current->pid, current->comm);
 #endif
 }
 
-/* ===== deny helper ===== */
 static __always_inline int deny(const char *why, struct file *file, unsigned int cmd_opt)
 {
 	if (!BB_ENFORCING) return 0;
