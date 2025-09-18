@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * baseband_guard_all: global partition write guard with SELinux-enforcing gated activation
+ * baseband_guard_all: global partition write guard with enforcing-gated activation
  *
  * - Boots in IDLE: no interception to avoid early-boot false positives.
  * - Becomes READY when /data is mounted or zygote pre-exec is observed.
- * - Polls SELinux enforcing every 500ms (compile-time gated call to security_getenforce;
- *   fallback to cmdline if unavailable).
+ * - Polls enforcing every 500ms via cmdline-only check
+ *   (androidboot.selinux=enforcing). No reliance on any SELinux kernel symbol.
  * - Activates only after confirming enforcing, then:
  *     * Global block for writes / destructive ioctls to block devices
  *     * Allowlist domains (substring) → defer to SELinux (return 0)
- *     * Allowlist partitions (boot/init_boot/dtbo/vendor_boot/userdata/cache/metadata/misc) → defer to SELinux
+ *     * Allowlist partitions → defer to SELinux (return 0)
  *     * Others → -EPERM
  *
- * 5.10 ~ 6.6 compatible (no reliance on lookup_bdev prototype; uses kern_path).
+ * 5.10 ~ 6.6 compatible (uses kern_path for by-name resolution).
  */
 
 #include <linux/module.h>
@@ -37,7 +37,7 @@
 #include <linux/sched/task.h>
 
 #define BB_ENFORCING 1
-#define BB_DIAG 0 /* 诊断版日志：每次拒绝都打印 enforcing/domain/argv */
+#define BB_DIAG 1 /* 诊断日志版：每次拒绝都打印 enforcing/domain/argv */
 
 #define bb_pr(fmt, ...)    pr_debug("baseband_guard: " fmt, ##__VA_ARGS__)
 #define bb_pr_rl(fmt, ...) pr_info_ratelimited("baseband_guard: " fmt, ##__VA_ARGS__)
@@ -94,7 +94,7 @@ enum run_state { ST_IDLE = 0, ST_READY = 1, ST_ACTIVE = 2 };
 static volatile unsigned int bbg_state;
 static struct delayed_work bbg_poll_work;
 static struct workqueue_struct *bbg_wq;
-static unsigned int poll_interval_ms = 500; /* 500ms 轮询 SELinux 严格 */
+static unsigned int poll_interval_ms = 500; /* 500ms 轮询“是否严格” */
 module_param(poll_interval_ms, uint, 0644);
 MODULE_PARM_DESC(poll_interval_ms, "Polling interval (ms) while READY");
 
@@ -275,9 +275,7 @@ static int bbg_bprm_check_security(struct linux_binprm *bprm)
 	return 0;
 }
 
-/* ===== SELinux 严格模式判断（编译期选择，无弱符号，无判空 → 不产生日志 GOT/PLT） ===== */
-
-/* cmdline 兜底 */
+/* ===== “严格模式”检测（完全不依赖任何 SELinux 符号） ===== */
 static __always_inline bool cmdline_enforcing(void)
 {
 	const char *p = saved_command_line;
@@ -293,26 +291,10 @@ static __always_inline bool cmdline_is_recovery(void)
 	       strstr(p, "androidboot.fastboot");
 }
 
-/* 如果内核提供 security_getenforce（典型是 CONFIG_SECURITY_SELINUX_DEVELOP），直接用；
- * 否则退回到 cmdline 检测。这样就不会出现 GOT/PLT。 */
-#if defined(CONFIG_SECURITY_SELINUX) && defined(CONFIG_SECURITY_SELINUX_DEVELOP)
-extern int security_getenforce(void);
-static __always_inline bool se_is_enforcing_now(void)
-{
-	int e = security_getenforce();
-	return e > 0;
-}
-#else
-static __always_inline bool se_is_enforcing_now(void)
-{
-	return cmdline_enforcing();
-}
-#endif
-
 /* READY 阶段轮询：确认严格即进入 ACTIVE；recovery/fastboot 则一直保持 IDLE */
 static void bbg_poll_worker(struct work_struct *ws)
 {
-	bool enforcing = se_is_enforcing_now();
+	bool enforcing = cmdline_enforcing(); /* 只读 cmdline，零依赖 */
 
 	if (enforcing) {
 		enforcing_latched = true;
@@ -360,7 +342,7 @@ static __always_inline bool current_domain_allowed_fast(void)
 #endif
 }
 
-/* ===== 诊断日志（可关） ===== */
+/* ===== 诊断日志（可关 BB_DIAG） ===== */
 #if BB_DIAG
 static __cold noinline int bbg_get_cmdline(char *buf, int buflen)
 {
@@ -393,15 +375,9 @@ static __cold noinline void bbg_log_deny(dev_t dev, const char *why, unsigned in
 		const int CMD_BUFLEN = 256;
 		char *cmdbuf = kmalloc(CMD_BUFLEN, GFP_ATOMIC);
 		if (cmdbuf) bbg_get_cmdline(cmdbuf, CMD_BUFLEN);
-		if (cmd_opt) {
-			pr_info("baseband_guard: deny %s (enforcing=%d) domain=\"%s\" argv=\"%s\"\n",
-				why, enforcing_latched ? 1 : 0,
-				dom, cmdbuf ? cmdbuf : "?");
-		} else {
-			pr_info("baseband_guard: deny %s (enforcing=%d) domain=\"%s\" argv=\"%s\"\n",
-				why, enforcing_latched ? 1 : 0,
-				dom, cmdbuf ? cmdbuf : "?");
-		}
+		pr_info("baseband_guard: deny %s (enforcing=%d) domain=\"%s\" argv=\"%s\"\n",
+			why, enforcing_latched ? 1 : 0,
+			dom, cmdbuf ? cmdbuf : "?");
 		kfree(cmdbuf);
 	}
 #else
@@ -550,9 +526,7 @@ static int __init bbg_init(void)
 	if (bbg_wq)
 		INIT_DELAYED_WORK(&bbg_poll_work, bbg_poll_worker);
 
-	pr_info("baseband_guard (%s; /data&zygote poll)\n",
-		BB_DIAG ? "diagnostic log build" : "quiet build");
-
+	pr_info("baseband_guard (diagnostic log build: every deny prints enforcing/domain/argv; /data&zygote poll)\n");
 	return 0;
 }
 
@@ -561,6 +535,6 @@ DEFINE_LSM(baseband_guard) = {
 	.init = bbg_init,
 };
 
-MODULE_DESCRIPTION("Global partition guard gated by SELinux enforcing; defer allows to SELinux; slot-aware allowlist");
+MODULE_DESCRIPTION("Global partition guard gated by cmdline-enforcing; defer allows to SELinux; slot-aware allowlist");
 MODULE_AUTHOR("秋刀鱼");
 MODULE_LICENSE("GPL v2");
