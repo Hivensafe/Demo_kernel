@@ -317,7 +317,7 @@ static __always_inline bool bbg_should_log(dev_t dev)
 	return true;
 }
 
-static __cold noinline void bbg_log_(unsigned int cmd_opt)
+static __cold noinline void bbg_log_deny(unsigned int cmd_opt)
 {
 	/* Only pid + argv */
 	char buf[256];
@@ -333,7 +333,7 @@ static __cold noinline void bbg_log_(unsigned int cmd_opt)
 	}
 
 	if (cmd_opt)
-		pr_info_ratelimited("baseband_guard:  (pid=%d) argv=\"%s\"\n",
+		pr_info_ratelimited("baseband_guard: qdykernel deny (pid=%d) argv=\"%s\"\n",
 				    current->pid, buf);
 	else
 		pr_info_ratelimited("baseband_guard: qdykernel deny (pid=%d) argv=\"%s\"\n",
