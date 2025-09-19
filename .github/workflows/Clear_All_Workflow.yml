@@ -7,15 +7,13 @@ on:
         type: choice
         description: '清理的工作流名称'
         required: true
-        default: 'Build_serialID_check'
+        default: 'Build_security_check'
         options:
-          - Build_security_new
           - Build_security_check
           - Encrypt_script
           - Build_serialID_check
           - Build_TracePoint_test
           - Build_TracePoint_check
-          - Build_aria2c
           - test
       count:
         description: '最多清理的运行次数'
