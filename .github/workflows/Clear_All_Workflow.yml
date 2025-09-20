@@ -10,6 +10,7 @@ on:
         default: 'Build_security_check'
         options:
           - Build_security_check
+          - Build_security_BBG
           - Encrypt_script
           - Build_serialID_check
           - Build_TracePoint_test
