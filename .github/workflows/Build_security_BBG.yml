@@ -271,13 +271,13 @@ jobs:
           mv init/main.c.patched init/main.c
           echo "已自动插入 serialid_check.c 到 main.c"
 
-          
-      - name: Add baseband_guard_module (添加security防格机模块)
-        if: ${{inputs.enable_feature_c }}
-        working-directory: kernel_workspace/kernel_platform/common
+      - name: Set Baseband-guard (配置bbg)
         run: |
-            wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-
+          cd kernel_workspace/kernel_platform/common
+          curl -LSs "https://raw.githubusercontent.com/showdo/Baseband-guard/refs/heads/test/setup.sh" -o setup.sh && bash setup.sh
+          echo >> ./arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./arch/arm64/configs/gki_defconfig
+      
             
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
@@ -396,7 +396,6 @@ jobs:
           echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_SECURITY_BASEBAND_GUARD=y" >> ./common/arch/arm64/configs/gki_defconfig
           
           
           if [ "$ENABLE_B" = "BBR" ]; then
