@@ -1,4 +1,5 @@
-name: Build_security_BBG
+name: Build_Action
+
 on:
   workflow_dispatch:
     inputs:
@@ -16,70 +17,128 @@ on:
           - 'realme_GT7pro'
           - 'realme_GT7pro_Speed'
         default: 'oneplus_ace5_pro'
-
       keep_original_settings:
         description: "📝保持原内核名称及构建时间(不懂请保持默认)"
         required: false
         default: true
         type: boolean
-
       custom_kernel_suffix:
         description: "✏️ 自定义内核名称- 仅在取消勾选'保持原设置'时有效(不懂请保持默认)"
         required: false
         default: ''
-      
       custom_kernel_time:
         description: "⏰ 自定义构建时间- 仅在取消勾选'保持原设置'时有效(不懂请保持默认)"
         required: false
         default: ''
-
       enable_feature_z:
         description: "添加风驰驱动"
         required: false
         default: true
         type: boolean
-
       enable_feature_a:
         description: "开启SerialID校验"
         required: false
         default: true
         type: boolean
-
       enable_feature_c:
         description: "开启BBG防格机"
         required: false
         default: true
         type: boolean
-      
-
       enable_feature_b:
-         description: "选择网络调度"
-         required: false
-         type: choice
-         options:
-            - 'FQ_CODEL'
-            - 'BBR'
-         default: 'FQ_CODEL'
-      
-       
+        description: "选择网络调度"
+        required: false
+        type: choice
+        options: ['FQ_CODEL','BBR']
+        default: 'FQ_CODEL'
 
+  workflow_call:
+    inputs:
+      REPO_MANIFEST:
+        required: true
+        type: string
+      keep_original_settings:
+        required: false
+        type: boolean
+        default: true
+      custom_kernel_suffix:
+        required: false
+        type: string
+        default: ''
+      custom_kernel_time:
+        required: false
+        type: string
+        default: ''
+      enable_feature_z:
+        required: false
+        type: boolean
+        default: true
+      enable_feature_a:
+        required: false
+        type: boolean
+        default: true
+      enable_feature_c:
+        required: false
+        type: boolean
+        default: true
+      enable_feature_b:
+        required: false
+        type: string
+        default: 'FQ_CODEL'
+    secrets:
+      MY_GITHUB_TOKEN:
+        required: false
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+      TELEGRAM_MESSAGE_THREAD_ID:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}-${{ inputs.REPO_MANIFEST || 'manual' }}
+  cancel-in-progress: false
 
 jobs:
   build:
-    name: Build_${{ github.event.inputs.REPO_MANIFEST }}
+    name: Build_${{ inputs.REPO_MANIFEST }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Normalize inputs
+        run: |
+          REPO_MANIFEST="${{ inputs.REPO_MANIFEST || env.REPO_MANIFEST }}"
+          KEEP="${{ inputs.keep_original_settings }}"
+          SUFFIX="${{ inputs.custom_kernel_suffix || env.custom_kernel_suffix }}"
+          CTIME="${{ inputs.custom_kernel_time || env.custom_kernel_time }}"
+          EFZ="${{ inputs.enable_feature_z }}"
+          EFA="${{ inputs.enable_feature_a }}"
+          EFC="${{ inputs.enable_feature_c }}"
+          EFB="${{ inputs.enable_feature_b || env.enable_feature_b }}"
+
+          echo "REPO_MANIFEST=$REPO_MANIFEST" >> $GITHUB_ENV
+          echo "keep_original_settings=$KEEP" >> $GITHUB_ENV
+          echo "custom_kernel_suffix=$SUFFIX" >> $GITHUB_ENV
+          echo "custom_kernel_time=$CTIME" >> $GITHUB_ENV
+          echo "enable_feature_z=$EFZ" >> $GITHUB_ENV
+          echo "enable_feature_a=$EFA" >> $GITHUB_ENV
+          echo "enable_feature_c=$EFC" >> $GITHUB_ENV
+          echo "enable_feature_b=$EFB" >> $GITHUB_ENV
+
       - name: 📊 Check disk space (检查磁盘空间)
         run: |
           echo "构建前磁盘空间："
           df -h
-      
+
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
         run: |
-          case "${{ github.event.inputs.REPO_MANIFEST }}" in
+          case "${{ env.REPO_MANIFEST }}" in
             oneplus_ace5_pro)
               echo "REPO_MANIFEST=JiuGeFaCai_oneplus_ace5_pro_v" >> $GITHUB_ENV
               echo "DEVICES_NAME=oneplus_ace5_pro" >> $GITHUB_ENV
@@ -121,7 +180,7 @@ jobs:
               echo "IMAGENAME=Image_Rm_GT_7_Pro_Speed" >> $GITHUB_ENV
               ;;
           esac
-          case "${{ github.event.inputs.REPO_MANIFEST }}" in
+          case "${{ env.REPO_MANIFEST }}" in
             realme_GT7pro_Speed)
               echo 'DEFAULT_SUFFIX=-android15-8-g013ec21bba94-abogki383916444-4k' >> $GITHUB_ENV
               ;;
@@ -141,11 +200,11 @@ jobs:
               echo 'DEFAULT_SUFFIX=-android15-8-g29d86c5fc9dd-abogki428889875-4k' >> $GITHUB_ENV
               ;;
           esac
-          if [ "${{ github.event.inputs.keep_original_settings }}" = "false" ] && [ -n "${{ github.event.inputs.custom_kernel_suffix }}" ]; then
+          if [ "${{ env.keep_original_settings }}" = "false" ] && [ -n "${{ env.custom_kernel_suffix }}" ]; then
             echo "使用自定义构建时间: $CUSTOM_TIME"
             echo "KERNEL_TIME=$CUSTOM_TIME" >> $GITHUB_ENV
           else
-            case "${{ github.event.inputs.REPO_MANIFEST }}" in
+            case "${{ env.REPO_MANIFEST }}" in
               realme_GT7pro_Speed)
                 echo 'KERNEL_TIME=Tue Dec 17 23:36:49 UTC 2024' >> $GITHUB_ENV
                 ;;
@@ -277,9 +336,6 @@ jobs:
           cd kernel_workspace/kernel_platform/common
           curl -sSL https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh -o setup.sh
           bash setup.sh
-          echo >> ./arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_BBG=y' >> ./arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./arm64/configs/gki_defconfig
   
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
@@ -382,8 +438,8 @@ jobs:
           
       - name: 🔧 Set gki_defconfig (设置编译配置)
         env:
-          ENABLE_B: ${{ github.event.inputs.enable_feature_b }} 
-          ENABLE_C: ${{ github.event.inputs.enable_feature_c }}       
+          ENABLE_B: ${{ env.enable_feature_b }} 
+          ENABLE_C: ${{ env.enable_feature_c }}       
         run: |
           cd kernel_workspace/kernel_platform
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -400,6 +456,12 @@ jobs:
           echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
 
+          if [ "$ENABLE_C" = "true" ]; then
+            echo 'CONFIG_BBG=y' >> ./common/arch/arm64/configs/gki_defconfig
+            echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+          
+          
           if [ "$ENABLE_B" = "BBR" ]; then
             echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -445,9 +507,9 @@ jobs:
 
       - name: 🔧 Set Kernel name (写入内核名称)
         env:
-          REPO_MANIFEST: ${{ github.event.inputs.REPO_MANIFEST }}
-          KEEP_ORIGINAL: ${{ github.event.inputs.keep_original_settings }}
-          CUSTOM_SUFFIX: ${{ github.event.inputs.custom_kernel_suffix }}
+          REPO_MANIFEST: ${{ env.REPO_MANIFEST }}
+          KEEP_ORIGINAL: ${{ env.keep_original_settings }}
+          CUSTOM_SUFFIX: ${{ env.custom_kernel_suffix }}
         run: |
           cd kernel_workspace/kernel_platform
           echo "当前机型: $DEVICES_NAME"

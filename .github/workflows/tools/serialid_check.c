@@ -4,26 +4,22 @@
 #include <linux/string.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
-#include <linux/init.h>      // saved_command_line
+#include <linux/init.h>
 #include <linux/errno.h>
-#include <linux/slab.h>      // kzalloc, kfree
-#include <linux/kernel.h>    // ARRAY_SIZE
+#include <linux/slab.h>
+#include <linux/kernel.h>
 #include <crypto/hash.h>
 
 #define SUFFIX              "TG@qdykernel"
-#define EXPECT_LEN          32            /* 固定比较前 32 个十六进制字符 */
-#define MAX_SN_LEN          128           /* 读取到的 SN 缓冲区大小 */
+#define EXPECT_LEN          32
+#define MAX_SN_LEN          128
 #define SYSFS_SN_PATH       "/sys/module/oplusboot/parameters/serialno"
 
-/*
- * 镜像内固化的 32 字节 ASCII 期望值
- */
 __attribute__((used))
 __attribute__((aligned(16)))
 volatile const char EXPECTED_ASCII32[EXPECT_LEN] =
     "8f0c3a9b0e2d4f11a0b2c3d4e5f60718";
 
-/* 读取上面的 32 字节到本地（防止被优化合并） */
 static inline void read_expected_ascii32(char *dst)
 {
     int i;
@@ -33,7 +29,6 @@ static inline void read_expected_ascii32(char *dst)
     }
 }
 
-/* -EACCES 时兜底：从 cmdline 解析 serialno */
 static int read_serial_from_cmdline(char *out, size_t outlen)
 {
     static const char *keys[] = {
@@ -62,7 +57,6 @@ static int read_serial_from_cmdline(char *out, size_t outlen)
     return -ENOENT;
 }
 
-/* 计算 sha256(SN || SUFFIX)，输出 64 字符小写 hex（以 '\0' 结尾） */
 static int sha256_hex_sn_suffix(const char *sn, char hex64[65])
 {
     struct crypto_shash *tfm;
@@ -80,7 +74,7 @@ static int sha256_hex_sn_suffix(const char *sn, char hex64[65])
         crypto_free_shash(tfm);
         return -ENOMEM;
     }
-    desc->tfm = tfm;  /* 兼容没有 desc->flags 的内核 */
+    desc->tfm = tfm;
 
     rc = crypto_shash_init(desc);
     if (!rc) rc = crypto_shash_update(desc, sn, strlen(sn));
@@ -92,7 +86,6 @@ static int sha256_hex_sn_suffix(const char *sn, char hex64[65])
     if (rc)
         return rc;
 
-    /* 小写十六进制编码 */
     for (i = 0; i < 32; ++i) {
         static const char hexd[] = "0123456789abcdef";
         hex64[i * 2]     = hexd[(digest[i] >> 4) & 0xF];
@@ -102,7 +95,6 @@ static int sha256_hex_sn_suffix(const char *sn, char hex64[65])
     return 0;
 }
 
-/* 线程：2 分钟后校验；-EACCES 回落到 cmdline；其余失败不 panic */
 static int serialid_checker_thread(void *data)
 {
     msleep(2 * 60 * 1000);
@@ -114,10 +106,8 @@ static int serialid_checker_thread(void *data)
     char hex64[65];
     char expect[EXPECT_LEN];
 
-    /* 读取固化的 32 ASCII */
     read_expected_ascii32(expect);
 
-    /* 先试 sysfs，遇到 -EACCES 用 cmdline 兜底 */
     file = filp_open(SYSFS_SN_PATH, O_RDONLY, 0);
     if (IS_ERR(file)) {
         long err = PTR_ERR(file);
@@ -150,7 +140,6 @@ do_hash:
         return 0;
     }
 
-    /* 只比较前 32 个 hex 字符（可批量以十六进制覆盖 EXPECTED_ASCII32 的 32 字节） */
     if (memcmp(hex64, expect, EXPECT_LEN) != 0) {
         pr_emerg("SOC_SN_CHECK: mismatch!\n"
                  "  SN       : %s\n"
