@@ -55,7 +55,7 @@ concurrency:
 jobs:
   build-matrix:
     name: Build (${{ matrix.device }})
-    uses: ./.github/workflows/Build_security_BBG.yml
+    uses: ./.github/workflows/Build_Action.yml
     secrets: inherit
     strategy:
       fail-fast: false
