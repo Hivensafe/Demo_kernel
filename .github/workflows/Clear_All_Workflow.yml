@@ -7,15 +7,10 @@ on:
         type: choice
         description: '清理的工作流名称'
         required: true
-        default: 'Build_security_check'
+        default: 'Build_security_BBG'
         options:
-          - Build_security_check
           - Build_security_BBG
           - Encrypt_script
-          - Build_serialID_check
-          - Build_TracePoint_test
-          - Build_TracePoint_check
-          - test
       count:
         description: '最多清理的运行次数'
         required: false
