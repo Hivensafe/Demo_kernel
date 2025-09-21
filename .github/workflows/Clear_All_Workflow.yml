@@ -54,7 +54,6 @@ jobs:
 
       - name: 清理指定工作流及本工作流运行记录
         env:
-          # 自动获取当前仓库信息
           REPO: ${{ github.repository }}
           COUNT: ${{ inputs.count }}
           DELETE_FAILED: ${{ inputs.delete_failed }}
