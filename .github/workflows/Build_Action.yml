@@ -314,7 +314,7 @@ jobs:
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
       - name: Add SerialID Check (添加SerialID校验)
-        if: ${{inputs.enable_feature_a }}
+        if: ${{env.enable_feature_a }}
         working-directory: kernel_workspace/kernel_platform/common
         run: |
           if grep -q 'SOC_SN_CHECK' init/main.c; then
@@ -331,11 +331,16 @@ jobs:
           fi
 
       - name: Set Baseband-guard (配置bbg)
+        if: ${{env.enable_feature_c }}
         run: |
           set -e
           cd kernel_workspace/kernel_platform/common
           curl -sSL https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh -o setup.sh
           bash setup.sh
+          echo >> ./arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_BBG=y' >> ./arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./arch/arm64/configs/gki_defconfig
+
   
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
@@ -456,12 +461,6 @@ jobs:
           echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
 
-          if [ "$ENABLE_C" = "true" ]; then
-            echo 'CONFIG_BBG=y' >> ./common/arch/arm64/configs/gki_defconfig
-            echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./common/arch/arm64/configs/gki_defconfig
-          fi
-          
-          
           if [ "$ENABLE_B" = "BBR" ]; then
             echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -532,7 +531,7 @@ jobs:
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
           
       - name: 🔧 Add sched_ext (写入风驰补丁)
-        if: ${{inputs.enable_feature_z }}
+        if: ${{env.enable_feature_z }}
         run: |
          cd kernel_workspace/kernel_platform/
          git clone https://github.com/HanKuCha/sched_ext.git

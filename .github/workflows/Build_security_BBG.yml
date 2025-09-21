@@ -279,7 +279,7 @@ jobs:
           bash setup.sh
           echo >> ./arch/arm64/configs/gki_defconfig
           echo 'CONFIG_BBG=y' >> ./arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./arm64/configs/gki_defconfig
+          echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./arch/arm64/configs/gki_defconfig
   
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
