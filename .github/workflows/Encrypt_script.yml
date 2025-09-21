@@ -11,7 +11,6 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # 缓存 apt-get 安装的依赖
     - name: Cache apt dependencies
       uses: actions/cache@v3
       with:
@@ -29,7 +28,6 @@ jobs:
 
     - name: Create script file
       run: |
-        # 以下第35行-68行的代码为加密脚本的内容
         cat << 'UNIQUE_SCRIPT_END_MARKER' > suksu_setup.sh
         #!/bin/bash
         set -euo pipefail

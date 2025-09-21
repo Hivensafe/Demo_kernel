@@ -46,7 +46,7 @@ on:
         type: boolean
 
       enable_feature_c:
-        description: "开启LSM防格机"
+        description: "开启BBG防格机"
         required: false
         default: true
         type: boolean
@@ -258,27 +258,26 @@ jobs:
         if: ${{inputs.enable_feature_a }}
         working-directory: kernel_workspace/kernel_platform/common
         run: |
-          # 防重复 patch
           if grep -q 'SOC_SN_CHECK' init/main.c; then
-            echo "main.c 已包含 patch, 跳过"
+            echo "main.c 已包含, 跳过"
             exit 0
+          else
+            cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
+            LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
+            head -n "$LINE" init/main.c > init/main.c.patched
+            cat serialid_check.c >> init/main.c.patched
+            tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
+            mv init/main.c.patched init/main.c
+            echo "已自动插入 serialid_check.c 到 main.c"
           fi
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/serialid_check.c" ./
-          LINE=$(grep -n '^#include' init/main.c | tail -n 1 | cut -d: -f1)
-          head -n "$LINE" init/main.c > init/main.c.patched
-          cat serialid_check.c >> init/main.c.patched
-          tail -n +$((LINE+1)) init/main.c >> init/main.c.patched
-          mv init/main.c.patched init/main.c
-          echo "已自动插入 serialid_check.c 到 main.c"
 
       - name: Set Baseband-guard (配置bbg)
         run: |
+          set -e
           cd kernel_workspace/kernel_platform/common
-          curl -LSs "https://raw.githubusercontent.com/showdo/Baseband-guard/refs/heads/test/setup.sh" -o setup.sh && bash setup.sh
-          echo >> ./arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./arch/arm64/configs/gki_defconfig
-      
-            
+          curl -sSL https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh -o setup.sh
+          bash setup.sh
+  
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         run: |
             mkdir -p kernel_workspace/kernel_platform
@@ -380,7 +379,8 @@ jobs:
           
       - name: 🔧 Set gki_defconfig (设置编译配置)
         env:
-          ENABLE_B: ${{ github.event.inputs.enable_feature_b }}       
+          ENABLE_B: ${{ github.event.inputs.enable_feature_b }} 
+          ENABLE_C: ${{ github.event.inputs.enable_feature_c }}       
         run: |
           cd kernel_workspace/kernel_platform
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -396,6 +396,11 @@ jobs:
           echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
+
+          if [ "$ENABLE_B" = "BBR" ]; then
+            echo 'CONFIG_BBG=y' >> ./common/arch/arm64/configs/gki_defconfig
+            echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./common/arch/arm64/configs/gki_defconfig
+          fi
           
           
           if [ "$ENABLE_B" = "BBR" ]; then
@@ -421,7 +426,6 @@ jobs:
             echo 'CONFIG_DEFAULT_NET_SCH="fq_codel"' >> ./common/arch/arm64/configs/gki_defconfig
           fi
           
-          # Add SUSFS configuration settings
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
