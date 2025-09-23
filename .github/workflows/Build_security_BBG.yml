@@ -275,7 +275,7 @@ jobs:
         run: |
           set -e
           cd kernel_workspace/kernel_platform/common
-          curl -sSL https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh -o setup.sh
+          curl -sSL https://github.com/Hivensafe/Baseband-guard/raw/main/setup.sh -o setup.sh
           bash setup.sh
           echo >> ./arch/arm64/configs/gki_defconfig
           echo 'CONFIG_BBG=y' >> ./arch/arm64/configs/gki_defconfig

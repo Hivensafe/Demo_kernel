@@ -14,12 +14,12 @@ on:
         type: boolean
         default: true
       custom_kernel_suffix:
-        description: "自定义内核后缀（keep=false 才生效）"
+        description: "自定义内核后缀（取消'保持原内核名称及构建时间'后生效)"
         required: false
         type: string
         default: ''
       custom_kernel_time:
-        description: "自定义构建时间（keep=false 才生效）"
+        description: "自定义构建时间（取消'保持原内核名称及构建时间'后生效)"
         required: false
         type: string
         default: ''
