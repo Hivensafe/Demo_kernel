@@ -361,40 +361,46 @@ jobs:
 
           set -euo pipefail
 
-          PATCH_FILE="${PATCH_FILE:-tracepoint-6.6.patch}"
+          PATCH_FILE="${PATCH_FILE:-ksu-tracepoint-6.6-minimal-v2.patch}"
 
-          mapfile -t PATCHED_FILES < <(sed -n 's/^\+\+\+ b\///p' "$PATCH_FILE" | grep -v '^/dev/null' | sort -u)
+          if [[ -f "$PATCH_FILE" ]]; then
+            mapfile -t PATCHED_FILES < <(sed -n 's/^\+\+\+ b\///p' "$PATCH_FILE" | grep -v '^/dev/null' | sort -u)
+          else
+            PATCHED_FILES=(fs/exec.c fs/open.c fs/read_write.c fs/stat.c)
+          fi
 
+          echo "🔎 检查/清理以下文件："
           printf ' - %s\n' "${PATCHED_FILES[@]}"
 
           for f in "${PATCHED_FILES[@]}"; do
-            if [[ ! -f "$f" ]]; then
-              echo "⏭️  跳过不存在的文件: $f"
-              continue
-            fi
+            [[ -f "$f" ]] || { echo "⏭️ 跳过不存在: $f"; continue; }
+
             sed -i -E 's/--- a\/[^\r\n]*$//' "$f"
             sed -i -E 's/\+\+\+ b\/[^\r\n]*$//' "$f"
             sed -i -E 's/diff --git[^\r\n]*$//' "$f"
             sed -i -E 's/@@[^@]*@@[^\r\n]*$//' "$f"
+            sed -i -E 's/\*\*\* End Patch.*$//' "$f"
 
-            total_lines=$(wc -l < "$f" | tr -d ' ')
-            hdr_line=$(awk '/^(--- a\/|\+\+\+ b\/|diff --git|@@ )/{print NR; exit}' "$f" || true)
-            if [[ -n "${hdr_line:-}" ]]; then
-              if (( hdr_line >= total_lines - 60 )); then
-                sed -i "${hdr_line},\$d" "$f"
-                echo "✂️  Trimmed trailing patch chunk in $f (from line $hdr_line to EOF)"
-              else
-                echo "⚠️  $f 中第 $hdr_line 行出现补丁头且不在尾部，未自动裁剪（建议人工确认）"
-              fi
-            fi
+            sed -i '/^\*\*\* \(Begin\|End\) Patch$/d' "$f"
 
-            if grep -nE '--- a/|\+\+\+ b/|^diff --git|^@@ ' "$f" >/dev/null; then
-              echo "❌ ${f} 仍含补丁头标记，请人工检查该文件"
+            total=$(wc -l < "$f" | tr -d ' ')
+            tail -n 80 "$f" | nl -ba -v $((total-80+1)) | \
+              awk '/^( *[0-9]+)\t(--- a\/|\+\+\+ b\/|diff --git|@@ |\*\*\* (Begin|End) Patch)/{print $1; exit}' | \
+              { read -r cutline || true
+                if [[ -n "${cutline:-}" ]]; then
+                  sed -i "${cutline},\$d" "$f"
+                  echo "✂️  Trimmed trailing patch chunk in $f from line $cutline"
+                fi
+              }
+
+            if grep -nE '--- a/|\+\+\+ b/|^diff --git|^@@ |\*\*\* (Begin|End) Patch' "$f" >/dev/null; then
+              echo "❌ ${f} 仍有补丁头残留，请人工检查"
               exit 1
             fi
           done
 
-          echo "✅ 补丁头检查与清理完成"
+          echo "✅ 补丁头清理完成"
+
 
 
 
