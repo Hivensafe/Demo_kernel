@@ -350,10 +350,33 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           # cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
           # patch -p1 -F 3 < syscall_hooks.patch
-          curl -sSL https://github.com/Hivensafe/SukiSU-TracePoint-fro-6.6/raw/main/tracepoint-6.6-full.patch -o tracepoint-6.6-full.patch
+          echo ">>> 获取 tracepoint 补丁..."
+          PATCH_URL="https://raw.githubusercontent.com/Hivensafe/SukiSU-TracePoint-fro-6.6/main/tracepoint-6.6-full.patch"
+          PATCH_FILE="tracepoint-6.6-full.patch"
+
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            "$PATCH_URL" -o "$PATCH_FILE"
+
+          sed -i 's/\r$//' "$PATCH_FILE"
+
+          if ! grep -Eq '^(diff --git|--- |\+\+\+ )' "$PATCH_FILE"; then
+            echo "❌ 下载到的不是有效补丁（可能是 HTML/错误页）。"
+            head -n 5 "$PATCH_FILE" || true
+            exit 2
+          fi
+
+          echo ">>> Dry-run 预检 tracepoint 补丁..."
+          patch --dry-run -Np1 < "$PATCH_FILE"
 
           echo ">>> 正式应用 tracepoint 补丁..."
-          patch -p1 < tracepoint-6.6-full.patch
+          patch -Np1 < "$PATCH_FILE"
+
+          echo ">>> 校验源码中是否残留补丁头..."
+          if grep -RInE '^(--- |\+\+\+ |diff --git|@@ )' fs drivers include kernel security | grep -v '\.patch:' ; then
+            echo "❌ 检测到源码中疑似残留补丁头，请检查补丁或上游环境"; exit 3
+          fi
+          echo "✅ tracepoint 补丁应用完成"
+
 
           echo "完成"
       - name: 🔍 Sanity check for stray patch headers
