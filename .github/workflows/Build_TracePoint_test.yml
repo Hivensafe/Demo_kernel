@@ -359,18 +359,53 @@ jobs:
           echo ">>> 正式应用 tracepoint 补丁..."
           patch -p1 < tracepoint-6.6.patch
 
-          # 1) 保留 EXPORT_SYMBOL 本体
-          sed -i 's/--- a\/fs\/read_write\.c.*$//' fs/open.c
+          set -euo pipefail
 
-          sed -i '/^--- a\/fs\/read_write\.c/,$d' fs/open.c
+          PATCH_FILE="${PATCH_FILE:-tracepoint-6.6.patch}"
 
-          grep -RInE '^(--- |\+\+\+ |diff --git|@@ )' fs || true
+          mapfile -t PATCHED_FILES < <(sed -n 's/^\+\+\+ b\///p' "$PATCH_FILE" | grep -v '^/dev/null' | sort -u)
+
+          printf ' - %s\n' "${PATCHED_FILES[@]}"
+
+          for f in "${PATCHED_FILES[@]}"; do
+            if [[ ! -f "$f" ]]; then
+              echo "⏭️  跳过不存在的文件: $f"
+              continue
+            fi
+            sed -i -E 's/--- a\/[^\r\n]*$//' "$f"
+            sed -i -E 's/\+\+\+ b\/[^\r\n]*$//' "$f"
+            sed -i -E 's/diff --git[^\r\n]*$//' "$f"
+            sed -i -E 's/@@[^@]*@@[^\r\n]*$//' "$f"
+
+            total_lines=$(wc -l < "$f" | tr -d ' ')
+            hdr_line=$(awk '/^(--- a\/|\+\+\+ b\/|diff --git|@@ )/{print NR; exit}' "$f" || true)
+            if [[ -n "${hdr_line:-}" ]]; then
+              if (( hdr_line >= total_lines - 60 )); then
+                sed -i "${hdr_line},\$d" "$f"
+                echo "✂️  Trimmed trailing patch chunk in $f (from line $hdr_line to EOF)"
+              else
+                echo "⚠️  $f 中第 $hdr_line 行出现补丁头且不在尾部，未自动裁剪（建议人工确认）"
+              fi
+            fi
+
+            if grep -nE '--- a/|\+\+\+ b/|^diff --git|^@@ ' "$f" >/dev/null; then
+              echo "❌ ${f} 仍含补丁头标记，请人工检查该文件"
+              exit 1
+            fi
+          done
+
+          echo "✅ 补丁头检查与清理完成"
+
 
 
           echo ">>> 校验插点是否落入 fs/*"
           grep -RIn "trace_ksu_trace_.*_hook" fs || { echo "未找到 tracepoint hook，检查补丁"; exit 1; }
 
           echo "完成"
+      - name: 🔍 Sanity check for stray patch headers
+        run: |
+          set -e
+          
 
 
       - name: 🔧 Cache HMBird patch (缓存HMBird补丁)
