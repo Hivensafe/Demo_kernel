@@ -359,9 +359,17 @@ jobs:
           echo ">>> 正式应用 tracepoint 补丁..."
           patch -p1 < tracepoint-6.6.patch
 
+          # 1) 保留 EXPORT_SYMBOL 本体
+          sed -i 's/--- a\/fs\/read_write\.c.*$//' fs/open.c
+
+          sed -i '/^--- a\/fs\/read_write\.c/,$d' fs/open.c
+
+          grep -RInE '^(--- |\+\+\+ |diff --git|@@ )' fs || true
+
+
           echo ">>> 校验插点是否落入 fs/*"
           grep -RIn "trace_ksu_trace_.*_hook" fs || { echo "未找到 tracepoint hook，检查补丁"; exit 1; }
-          
+
           echo "完成"
 
 
