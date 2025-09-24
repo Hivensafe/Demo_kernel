@@ -351,7 +351,16 @@ jobs:
           # cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
           # patch -p1 -F 3 < syscall_hooks.patch
           curl -sSL https://github.com/Hivensafe/SukiSU-TracePoint-fro-6.6/raw/main/tracepoint-6.6.patch -o tracepoint-6.6.patch
-          patch -p1 < tracepoint-6.6.patch || true
+          sed -i -E 's#^(---|\+\+\+) ([ab])/((exec|open|read_write|stat)\.c)#\1 \2/fs/\3#' tracepoint-6.6.patch
+
+          echo ">>> Dry-run 预检 tracepoint 补丁..."
+          patch --dry-run -p1 < tracepoint-6.6.patch
+
+          echo ">>> 正式应用 tracepoint 补丁..."
+          patch -p1 < tracepoint-6.6.patch
+
+          echo ">>> 校验插点是否落入 fs/*"
+          grep -RIn "trace_ksu_trace_.*_hook" fs || { echo "未找到 tracepoint hook，检查补丁"; exit 1; }
           
           echo "完成"
 
