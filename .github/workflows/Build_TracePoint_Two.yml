@@ -352,9 +352,6 @@ jobs:
           # patch -p1 -F 3 < syscall_hooks.patch
           curl -sSL https://github.com/Hivensafe/SukiSU-TracePoint-fro-6.6/raw/main/tracepoint-6.6-full.patch -o tracepoint-6.6-full.patch
 
-          echo ">>> Dry-run 预检 tracepoint 补丁..."
-          patch --dry-run -p1 < tracepoint-6.6-full.patch
-
           echo ">>> 正式应用 tracepoint 补丁..."
           patch -p1 < tracepoint-6.6-full.patch
 
@@ -401,6 +398,8 @@ jobs:
           # Add VFS configuration settings
           echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_TRACEPOINT_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_TRACEPOINT_HOOK_INPUT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_TRACEPOINT_HOOK_DEVPTS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
