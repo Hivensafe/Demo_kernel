@@ -1,0 +1,87 @@
+diff --git a/drivers/kernelsu/ksu_trace.h b/drivers/kernelsu/ksu_trace.h
+index 0000000..0000001 100644
+--- a/drivers/kernelsu/ksu_trace.h
++++ b/drivers/kernelsu/ksu_trace.h
+@@
+-#undef TRACE_SYSTEM
+-#define TRACE_SYSTEM ksu_trace
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM ksu_trace
+
+@@
+ DECLARE_TRACE(ksu_trace_execveat_sucompat_hook,
+ 	TP_PROTO(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags),
+ 	TP_ARGS(fd, filename_ptr, argv, envp, flags));
++
++/* 新增：普通 execveat 事件，匹配 fs/exec.c 中的 trace_ksu_trace_execveat_hook() */
++DECLARE_TRACE(ksu_trace_execveat_hook,
++	TP_PROTO(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags),
++	TP_ARGS(fd, filename_ptr, argv, envp, flags));
+
+ DECLARE_TRACE(ksu_trace_faccessat_hook,
+ 	TP_PROTO(int *dfd, const char __user **filename_user, int *mode, int *flags),
+ 	TP_ARGS(dfd, filename_user, mode, flags));
+@@
+ #undef TRACE_INCLUDE_FILE
+ #define TRACE_INCLUDE_FILE ksu_trace
+ #include <trace/define_trace.h>
+diff --git a/drivers/kernelsu/ksu_trace.c b/drivers/kernelsu/ksu_trace.c
+index 0000000..0000002 100644
+--- a/drivers/kernelsu/ksu_trace.c
++++ b/drivers/kernelsu/ksu_trace.c
+@@
+-#include "ksu_trace.h"
++#include "ksu_trace.h"
++#include <linux/init.h>
+@@
++/* 新增：普通 execveat 回调，与 sucompat 共享处理函数 */
++void ksu_trace_execveat_hook_callback(void *data, int *fd, struct filename **filename_ptr,
++                void *argv, void *envp, int *flags)
++{
++	ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);
++}
+@@
+ void ksu_trace_register(void)
+ {
++    register_trace_ksu_trace_execveat_hook(ksu_trace_execveat_hook_callback, NULL);
+     register_trace_ksu_trace_execveat_sucompat_hook(ksu_trace_execveat_sucompat_hook_callback, NULL);
+     register_trace_ksu_trace_faccessat_hook(ksu_trace_faccessat_hook_callback, NULL);
+     register_trace_ksu_trace_sys_read_hook(ksu_trace_sys_read_hook_callback, NULL);
+     register_trace_ksu_trace_stat_hook(ksu_trace_stat_hook_callback, NULL);
+     register_trace_ksu_trace_input_hook(ksu_trace_input_hook_callback, NULL);
+ }
+@@
+ void ksu_trace_unregister(void)
+ {
++    unregister_trace_ksu_trace_execveat_hook(ksu_trace_execveat_hook_callback, NULL);
+     unregister_trace_ksu_trace_execveat_sucompat_hook(ksu_trace_execveat_sucompat_hook_callback, NULL);
+     unregister_trace_ksu_trace_faccessat_hook(ksu_trace_faccessat_hook_callback, NULL);
+     unregister_trace_ksu_trace_sys_read_hook(ksu_trace_sys_read_hook_callback, NULL);
+     unregister_trace_ksu_trace_stat_hook(ksu_trace_stat_hook_callback, NULL);
+     unregister_trace_ksu_trace_input_hook(ksu_trace_input_hook_callback, NULL);
+ }
++
++/* 新增：自动注册，防止没人调用 ksu_trace_register() */
++static int __init ksu_trace_init(void)
++{
++    ksu_trace_register();
++    return 0;
++}
++subsys_initcall(ksu_trace_init);
+diff --git a/drivers/kernelsu/ksu_trace_provider.c b/drivers/kernelsu/ksu_trace_provider.c
+new file mode 100644
+index 0000000..0000003
+--- /dev/null
++++ b/drivers/kernelsu/ksu_trace_provider.c
+@@
++/* 实例化 ksu_trace 事件系统：唯一处 */
++#define CREATE_TRACE_POINTS
++#define TRACE_INCLUDE_PATH .
++#define TRACE_INCLUDE_FILE ksu_trace
++#include "ksu_trace.h"
+diff --git a/drivers/kernelsu/Makefile b/drivers/kernelsu/Makefile
+index 0000000..0000004 100644
+--- a/drivers/kernelsu/Makefile
++++ b/drivers/kernelsu/Makefile
+@@
++obj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_trace_provider.o

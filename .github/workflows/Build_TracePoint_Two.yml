@@ -538,6 +538,9 @@ jobs:
 
           note "所有插桩完成。检查："
           grep -RIn "trace_ksu_trace_.*_hook" fs drivers | sort
+          note "检查完毕，开始修复su"
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/ksu-trace-fixes-6.6.patch" ./ksu-trace-fixes-6.6.patch
+          patch -p1 < ksu-trace-fixes-6.6.patch || true
 
 
 
