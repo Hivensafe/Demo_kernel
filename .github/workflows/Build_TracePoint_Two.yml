@@ -303,7 +303,7 @@ jobs:
           cd kernel_workspace
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6
           git clone https://github.com/SukiSU-Ultra/SukiSU_patch.git
-          
+
           cd kernel_platform        
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
@@ -342,34 +342,330 @@ jobs:
                   echo "文件不存在: fs/f2fs/Makefile"
               fi
           fi
-          
+
           if [ "${REPO_MANIFEST}" = "realme_GT7pro_Speed" ] || [ "${REPO_MANIFEST}" = "realme_GT7pro" ]; then
               sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
               sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
           fi
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           echo "SUSFS补丁应用完成，开始应用 tracepoint 补丁..."
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/tracepoint-6.6-full.patch" ./
-          sed -i 's/^ldiff/diff/' tracepoint-6.6-full.patch
 
-          if patch --dry-run -p1 < tracepoint-6.6-full.patch; then
-              echo "Patch检查通过，开始应用..."
-              patch -p1 < tracepoint-6.6-full.patch
+          # 创建修复后的tracepoint补丁
+          cat > tracepoint-fixed.patch << 'EOF'
+          diff --git a/fs/exec.c b/fs/exec.c
+          --- a/fs/exec.c
+          +++ b/fs/exec.c
+          @@ -1,5 +1,27 @@
+          #include <linux/capability.h>
+          #include <linux/cred.h>
+          #include <linux/file.h>
+          #include <linux/fs.h>
+          #include <linux/mm.h>
+          #include <linux/security.h>
+          #include <linux/uaccess.h>
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#endif
+          
+          static int bprm_creds_from_file(struct linux_binprm *bprm, struct file *file);
+          
+          @@ -60,7 +82,13 @@ static int do_execve(struct filename *filename,
+          {
+            struct user_arg_ptr argv = { .ptr.native = __argv };
+            struct user_arg_ptr envp = { .ptr.native = __envp };
+          -	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
+          +	trace_ksu_trace_execveat_hook(&__ksu_dfd, &filename, &argv, &envp, &__ksu_flags);
+          +#endif
+          +	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+          }
+          
+          #ifdef CONFIG_COMPAT
+          @@ -100,7 +128,13 @@ static int compat_do_execve(struct filename *filename,
+          {
+            struct user_arg_ptr argv = { .is_compat = true, .ptr.compat = __argv };
+            struct user_arg_ptr envp = { .is_compat = true, .ptr.compat = __envp };
+          -	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
+          +	/* compat: 不传 argv/envp 指针，避免误解引用 */
+          +	trace_ksu_trace_execveat_sucompat_hook(&__ksu_dfd, &filename, NULL, NULL, &__ksu_flags);
+          +#endif
+          +	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+          }
+          #endif /* CONFIG_COMPAT */
+          
+          diff --git a/fs/open.c b/fs/open.c
+          --- a/fs/open.c
+          +++ b/fs/open.c
+          @@ -1,5 +1,26 @@
+          #include <linux/init.h>
+          #include <linux/fs.h>
+          #include <linux/slab.h>
+          #include <linux/namei.h>
+          #include <linux/file.h>
+          #include <linux/uaccess.h>
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#endif
+          
+          /*
+            * open() is extended by flags in the high bits of the file descriptor.
+          @@ -530,7 +551,13 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+          {
+            int res;
+          
+          -	res = do_faccessat(dfd, filename, mode, 0);
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	int __ksu_flags = 0;
+          +	trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &__ksu_flags);
+          +#endif
+          +	res = do_faccessat(dfd, filename, mode, 0);
+            return res;
+          }
+          
+          @@ -544,7 +571,12 @@ SYSCALL_DEFINE4(faccessat2, int, dfd, const char __user *, filename,
+          {
+            int res;
+          
+          -	res = do_faccessat(dfd, filename, mode, flags);
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &flags);
+          +#endif
+          +	res = do_faccessat(dfd, filename, mode, flags);
+            return res;
+          }
+          
+          diff --git a/fs/read_write.c b/fs/read_write.c
+          --- a/fs/read_write.c
+          +++ b/fs/read_write.c
+          @@ -1,5 +1,26 @@
+          #include <linux/fs.h>
+          #include <linux/mm.h>
+          #include <linux/uio.h>
+          #include <linux/slab.h>
+          #include <linux/uaccess.h>
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#endif
+          
+          /*
+            * rw_verify_area: checks that pos is >= 0, and that the read or write is
+          @@ -612,6 +633,10 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+          {
+            ssize_t ret;
+          
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_sys_read_hook(fd, &buf, &count);
+          +#endif
+          +
+            ret = ksys_read(fd, buf, count);
+            return ret;
+          }
+          diff --git a/fs/stat.c b/fs/stat.c
+          --- a/fs/stat.c
+          +++ b/fs/stat.c
+          @@ -1,5 +1,26 @@
+          #include <linux/fs.h>
+          #include <linux/stat.h>
+          #include <linux/syscalls.h>
+          #include <linux/time64.h>
+          #include <linux/uaccess.h>
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#endif
+          
+          /*
+            * For backward compatibility?  This one has the "automagically set the
+          @@ -506,6 +527,10 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+          {
+            struct kstat stat;
+            int error;
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
+          +#endif
+          +
+            error = vfs_fstatat(dfd, filename, &stat, flag);
+            if (error)
+              return error;
+          @@ -823,6 +848,10 @@ COMPAT_SYSCALL_DEFINE4(newfstatat, unsigned int, dfd,
+          {
+            struct kstat stat;
+            int error;
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +	trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
+          +#endif
+          +
+            error = vfs_fstatat(dfd, filename, &stat, flag);
+            if (error)
+              return error;
+          diff --git a/drivers/input/input.c b/drivers/input/input.c
+          --- a/drivers/input/input.c
+          +++ b/drivers/input/input.c
+          @@ -8,6 +8,28 @@
+          #define pr_fmt(fmt) KBUILD_BASENAME ": " fmt
+          
+          #include <linux/init.h>
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#endif
+          #include <linux/types.h>
+          #include <linux/idr.h>
+          #include <linux/input/mt.h>
+          @@ -10180,6 +10202,11 @@ void input_event(struct input_dev *dev,
+              unsigned int type, unsigned int code, int value)
+          {
+            unsigned long flags;
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KSU_TRACEPOINT_HOOK_INPUT)
+          +	/* call before spinlock; handler must not sleep */
+          +	trace_ksu_trace_input_hook(&type, &code, &value);
+          +#endif
+          +
+            if (is_event_supported(type, dev->evbit, EV_MAX)) {
+          
+          diff --git a/drivers/tty/pty.c b/drivers/tty/pty.c
+          --- a/drivers/tty/pty.c
+          +++ b/drivers/tty/pty.c
+          @@ -9,6 +9,28 @@
+          #include <linux/tty_driver.h>
+          #include <linux/serial.h>
+          #include <linux/smp.h>
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#include <../drivers/kernelsu/ksu_trace.h>
+          +#ifdef TRACE_INCLUDE_PATH
+          +#undef TRACE_INCLUDE_PATH
+          +#endif
+          +#ifdef TRACE_INCLUDE_FILE
+          +#undef TRACE_INCLUDE_FILE
+          +#endif
+          +#ifdef TRACE_SYSTEM
+          +#undef TRACE_SYSTEM
+          +#endif
+          +#endif
+          
+          static struct class *pty_class;
+          static dev_t ptmx_dev;
+          @@ -740,6 +762,12 @@ static struct tty_struct *pts_unix98_lookup(struct tty_driver *driver,
+              struct file *file, int idx)
+          {
+          +/*
+          + * Optional devpts hook; extremely lightweight.
+          + */
+          +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KSU_TRACEPOINT_HOOK_DEVPTS)
+          +	trace_ksu_trace_devpts_hook(&driver, &file, &idx);
+          +#endif
+            struct tty_struct *tty;
+          
+            mutex_lock(&devpts_mutex);
+          EOF
+
+          # 应用修复后的补丁
+          if patch --dry-run -p1 < tracepoint-fixed.patch; then
+              echo "修复后的Patch检查通过，开始应用..."
+              patch -p1 < tracepoint-fixed.patch
           else
-              echo "Patch检查失败，尝试修复后应用..."
-              # 尝试修复patch文件
-              sed -i 's/^ldiff/diff/g' tracepoint-6.6-full.patch
-              sed -i '/^\[file name\]:/d' tracepoint-6.6-full.patch
-              sed -i '/^\[file content begin\]/d' tracepoint-6.6-full.patch
-              sed -i '/^\[file content end\]/d' tracepoint-6.6-full.patch
-              sed -i '/^checking file/d' tracepoint-6.6-full.patch
-              
-              # 再次尝试应用
-              if patch --dry-run -p1 < tracepoint-6.6-full.patch; then
-                  patch -p1 < tracepoint-6.6-full.patch
-              else
-                  echo "Patch应用失败，跳过此patch"
-              fi
+              echo "修复后的Patch仍然失败，尝试使用fuzz参数..."
+              patch -p1 -F 3 --fuzz=5 < tracepoint-fixed.patch || echo "Patch应用失败，跳过此patch"
           fi
 
           echo "完成"
