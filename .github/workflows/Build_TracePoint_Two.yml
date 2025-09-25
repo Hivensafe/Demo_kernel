@@ -539,14 +539,149 @@ jobs:
           note "所有插桩完成。检查："
           grep -RIn "trace_ksu_trace_.*_hook" fs drivers | sort
           note "检查完毕，开始修复su"
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/ksu-trace-fixes-6.6.patch" ./ksu-trace-fixes-6.6.patch
-          test -d drivers/kernelsu && echo "drivers/kernelsu 存在" || echo "不存在"
-          note "尝试p1检查 ksu-trace-fixes-6.6.patch"
-          patch --dry-run -p1 ksu-trace-fixes-6.6.patch
-          note "尝试p0检查 ksu-trace-fixes-6.6.patch"
-          patch --dry-run -p0 ksu-trace-fixes-6.6.patch
-          note "应用 ksu-trace-fixes-6.6.patch"
-          patch -p1 < ksu-trace-fixes-6.6.patch || true
+          die(){ echo "[fix] $*"; exit 1; }
+          ok(){ echo "[fix] $*"; }
+
+          cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+          # 1) 确保目录存在
+          test -d drivers/kernelsu || die "drivers/kernelsu 不存在（请确认路径在 kernel_platform/common 下）"
+
+          # 2) 新增/修复 provider：ksu_trace_provider.c（实例化事件系统）
+          PROV=drivers/kernelsu/ksu_trace_provider.c
+          if ! grep -q 'CREATE_TRACE_POINTS' "$PROV" 2>/dev/null; then
+            cat > "$PROV" <<'EOF'
+          /* 实例化 ksu_trace 事件系统（唯一处） */
+          #define CREATE_TRACE_POINTS
+          #define TRACE_INCLUDE_PATH .
+          #define TRACE_INCLUDE_FILE ksu_trace
+          #include "ksu_trace.h"
+          EOF
+            ok "写入 $PROV"
+          else
+            ok "$PROV 已存在 CREATE_TRACE_POINTS，跳过"
+          fi
+
+          # 3) Makefile 里纳入 provider
+          MK=drivers/kernelsu/Makefile
+          if ! grep -q 'ksu_trace_provider.o' "$MK" 2>/dev/null; then
+            echo 'obj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_trace_provider.o' >> "$MK"
+            ok "Makefile 追加 ksu_trace_provider.o"
+          else
+            ok "Makefile 已包含 ksu_trace_provider.o"
+          fi
+
+          # 4) 头文件：补 DECLARE_TRACE(ksu_trace_execveat_hook)
+          HDR=drivers/kernelsu/ksu_trace.h
+          test -f "$HDR" || die "缺少 $HDR"
+          if ! grep -q 'DECLARE_TRACE(ksu_trace_execveat_hook' "$HDR"; then
+            # 在 sucompat 声明后插入
+            awk '
+              BEGIN{done=0}
+              /DECLARE_TRACE\(ksu_trace_execveat_sucompat_hook/ && !done{
+                print $0
+                print ""
+                print "/* 普通 execveat 事件，与 sucompat 并存 */"
+                print "DECLARE_TRACE(ksu_trace_execveat_hook,"
+                print "\tTP_PROTO(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags),"
+                print "\tTP_ARGS(fd, filename_ptr, argv, envp, flags));"
+                done=1; next
+              }
+              {print}
+            ' "$HDR" > "$HDR.__tmp__" && mv "$HDR.__tmp__" "$HDR"
+            ok "ksu_trace.h 补充 DECLARE_TRACE(ksu_trace_execveat_hook)"
+          else
+            ok "ksu_trace.h 已有 execveat_hook 声明"
+          fi
+
+          # 5) 消费者：ksu_trace.c 里补 回调 + 注册/注销 + initcall
+          SRC=drivers/kernelsu/ksu_trace.c
+          test -f "$SRC" || die "缺少 $SRC"
+
+          # 5.1 include <linux/init.h>
+          grep -q '#include <linux/init.h>' "$SRC" || \
+            sed -i '1s|^|#include <linux/init.h>\n|' "$SRC"
+
+          # 5.2 回调函数
+          if ! grep -q 'ksu_trace_execveat_hook_callback' "$SRC"; then
+            cat >> "$SRC" <<'EOF'
+
+          /* 普通 execveat 回调，与 sucompat 共享处理函数 */
+          void ksu_trace_execveat_hook_callback(void *data, int *fd, struct filename **filename_ptr,
+                          void *argv, void *envp, int *flags)
+          {
+              ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);
+          }
+          EOF
+            ok "ksu_trace.c 新增 execveat_hook 回调"
+          else
+            ok "ksu_trace.c 已有 execveat_hook 回调"
+          fi
+
+          # 5.3 在 register 函数中追加 register_trace_ksu_trace_execveat_hook
+          if grep -q 'void ksu_trace_register' "$SRC" && ! grep -q 'register_trace_ksu_trace_execveat_hook' "$SRC"; then
+            sed -i '/register_trace_ksu_trace_execveat_sucompat_hook/i \
+              register_trace_ksu_trace_execveat_hook(ksu_trace_execveat_hook_callback, NULL);' "$SRC"
+            ok "ksu_trace.c 注册 execveat_hook"
+          else
+            ok "ksu_trace.c 注册部分已存在或未找到 ksu_trace_register（请手查）"
+          fi
+
+          # 5.4 在 unregister 中追加 unregister_trace_ksu_trace_execveat_hook
+          if grep -q 'void ksu_trace_unregister' "$SRC" && ! grep -q 'unregister_trace_ksu_trace_execveat_hook' "$SRC"; then
+            sed -i '/unregister_trace_ksu_trace_execveat_sucompat_hook/i \
+              unregister_trace_ksu_trace_execveat_hook(ksu_trace_execveat_hook_callback, NULL);' "$SRC"
+            ok "ksu_trace.c 注销 execveat_hook"
+          else
+            ok "ksu_trace.c 注销部分已存在或未找到 ksu_trace_unregister（请手查）"
+          fi
+
+          # 5.5 自动注册（subsys_initcall），避免没人调用 ksu_trace_register()
+          if ! grep -q 'subsys_initcall(ksu_trace_init)' "$SRC"; then
+            cat >> "$SRC" <<'EOF'
+
+          static int __init ksu_trace_init(void)
+          {
+              ksu_trace_register();
+              return 0;
+          }
+          subsys_initcall(ksu_trace_init);
+          EOF
+            ok "ksu_trace.c 增加 subsys_initcall 自动注册"
+          else
+            ok "ksu_trace.c 已有 initcall 自动注册或等价逻辑"
+          fi
+
+          # 6) execve 透传（把回调可能写入的 dfd/flags 带入 do_execveat_common）
+          EXE=fs/exec.c
+          if grep -q 'return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);' "$EXE"; then
+            sed -i 's@return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);@#if defined(CONFIG_KSU) \&\& defined(CONFIG_KSU_TRACEPOINT_HOOK)\
+          { int __ksu_flags = 0, __ksu_dfd = AT_FDCWD; \
+            trace_ksu_trace_execveat_hook(\&__ksu_dfd, \&filename, \&argv, \&envp, \&__ksu_flags); \
+            return do_execveat_common(__ksu_dfd, filename, argv, envp, __ksu_flags); }\
+          #else\
+          return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\
+          #endif@' "$EXE"
+            ok "fs/exec.c 正常路径透传 flags/dfd"
+          fi
+          if grep -n 'compat_do_execve' "$EXE" >/dev/null 2>&1; then
+            # 第二处（compat）通常同样 return 0
+            cnt=$(grep -n 'return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);' "$EXE" | wc -l)
+            if [ "$cnt" -ge 1 ]; then
+              # 粗略：再次替换一处（如果前面只替了1次）
+              sed -i '0,/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/s//\
+          #if defined(CONFIG_KSU) \&\& defined(CONFIG_KSU_TRACEPOINT_HOOK)\
+          { int __ksu_flags = 0, __ksu_dfd = AT_FDCWD; \
+            trace_ksu_trace_execveat_sucompat_hook(\&__ksu_dfd, \&filename, NULL, NULL, \&__ksu_flags); \
+            return do_execveat_common(__ksu_dfd, filename, argv, envp, __ksu_flags); }\
+          #else\
+          return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\
+          #endif\
+          /' "$EXE" || true
+              ok "fs/exec.c compat 路径透传 flags/dfd（若存在）"
+            fi
+          fi
+
 
 
 
