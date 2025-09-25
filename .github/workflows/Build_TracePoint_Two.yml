@@ -348,9 +348,30 @@ jobs:
               sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
           fi
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/tracepoint-6.6-full.patch" ./tracepoint-6.6-full.patch
-          patch --dry-run -p1 < tracepoint-6.6-full.patch
-          patch -p1 < tracepoint-6.6-full.patch || true
+          echo "SUSFS补丁应用完成，开始应用 tracepoint 补丁..."
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/tracepoint-6.6-full.patch" ./
+          sed -i 's/^ldiff/diff/' tracepoint-6.6-full.patch
+
+          if patch --dry-run -p1 < tracepoint-6.6-full.patch; then
+              echo "Patch检查通过，开始应用..."
+              patch -p1 < tracepoint-6.6-full.patch
+          else
+              echo "Patch检查失败，尝试修复后应用..."
+              # 尝试修复patch文件
+              sed -i 's/^ldiff/diff/g' tracepoint-6.6-full.patch
+              sed -i '/^\[file name\]:/d' tracepoint-6.6-full.patch
+              sed -i '/^\[file content begin\]/d' tracepoint-6.6-full.patch
+              sed -i '/^\[file content end\]/d' tracepoint-6.6-full.patch
+              sed -i '/^checking file/d' tracepoint-6.6-full.patch
+              
+              # 再次尝试应用
+              if patch --dry-run -p1 < tracepoint-6.6-full.patch; then
+                  patch -p1 < tracepoint-6.6-full.patch
+              else
+                  echo "Patch应用失败，跳过此patch"
+              fi
+          fi
+
           echo "完成"
 
       - name: 🔧 Cache HMBird patch (缓存HMBird补丁)
