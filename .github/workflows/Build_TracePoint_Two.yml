@@ -303,7 +303,7 @@ jobs:
           cd kernel_workspace
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6
           git clone https://github.com/SukiSU-Ultra/SukiSU_patch.git
-
+          
           cd kernel_platform        
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
@@ -342,20 +342,20 @@ jobs:
                   echo "文件不存在: fs/f2fs/Makefile"
               fi
           fi
-
+          
           if [ "${REPO_MANIFEST}" = "realme_GT7pro_Speed" ] || [ "${REPO_MANIFEST}" = "realme_GT7pro" ]; then
               sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-android15-6.6.patch
               sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
           fi
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-          echo "SUSFS补丁应用完成，开始应用 tracepoint 补丁..."
+          echo "SUSFS补丁应用完成，开始应用 tracepoint 补丁"
 
-          # 创建修复后的tracepoint补丁
-          cat > tracepoint-fixed.patch << 'EOF'
+          cat > tracepoint-6.6-full-for-p1.patch <<'PATCH'
           diff --git a/fs/exec.c b/fs/exec.c
+          index 1111111..2222222 100644
           --- a/fs/exec.c
           +++ b/fs/exec.c
-          @@ -1,5 +1,27 @@
+          @@ -1,12 +1,34 @@
           #include <linux/capability.h>
           #include <linux/cred.h>
           #include <linux/file.h>
@@ -387,37 +387,36 @@ jobs:
           
           static int bprm_creds_from_file(struct linux_binprm *bprm, struct file *file);
           
-          @@ -60,7 +82,13 @@ static int do_execve(struct filename *filename,
+          @@ -60,10 +82,19 @@ static int do_execve(struct filename *filename,
           {
             struct user_arg_ptr argv = { .ptr.native = __argv };
             struct user_arg_ptr envp = { .ptr.native = __envp };
-          -	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
           +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
           +	int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
           +	trace_ksu_trace_execveat_hook(&__ksu_dfd, &filename, &argv, &envp, &__ksu_flags);
           +#endif
-          +	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+            return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
           }
           
           #ifdef CONFIG_COMPAT
-          @@ -100,7 +128,13 @@ static int compat_do_execve(struct filename *filename,
+          @@ -100,10 +121,19 @@ static int compat_do_execve(struct filename *filename,
           {
             struct user_arg_ptr argv = { .is_compat = true, .ptr.compat = __argv };
             struct user_arg_ptr envp = { .is_compat = true, .ptr.compat = __envp };
-          -	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
           +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
           +	int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
-          +	/* compat: 不传 argv/envp 指针，避免误解引用 */
+          +	/* compat：不传 argv/envp 指针，避免 sucompat 误判 */
           +	trace_ksu_trace_execveat_sucompat_hook(&__ksu_dfd, &filename, NULL, NULL, &__ksu_flags);
           +#endif
-          +	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+            return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
           }
           #endif /* CONFIG_COMPAT */
           
           diff --git a/fs/open.c b/fs/open.c
+          index 3333333..4444444 100644
           --- a/fs/open.c
           +++ b/fs/open.c
-          @@ -1,5 +1,26 @@
+          @@ -1,12 +1,33 @@
           #include <linux/init.h>
           #include <linux/fs.h>
           #include <linux/slab.h>
@@ -448,7 +447,7 @@ jobs:
           
           /*
             * open() is extended by flags in the high bits of the file descriptor.
-          @@ -530,7 +551,13 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+          @@ -530,7 +551,12 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
           {
             int res;
           
@@ -461,7 +460,7 @@ jobs:
             return res;
           }
           
-          @@ -544,7 +571,12 @@ SYSCALL_DEFINE4(faccessat2, int, dfd, const char __user *, filename,
+          @@ -544,7 +570,11 @@ SYSCALL_DEFINE4(faccessat2, int, dfd, const char __user *, filename,
           {
             int res;
           
@@ -474,9 +473,10 @@ jobs:
           }
           
           diff --git a/fs/read_write.c b/fs/read_write.c
+          index 5555555..6666666 100644
           --- a/fs/read_write.c
           +++ b/fs/read_write.c
-          @@ -1,5 +1,26 @@
+          @@ -1,12 +1,33 @@
           #include <linux/fs.h>
           #include <linux/mm.h>
           #include <linux/uio.h>
@@ -506,6 +506,7 @@ jobs:
           
           /*
             * rw_verify_area: checks that pos is >= 0, and that the read or write is
+            * going to a valid part of the file (that is, it fits in the file, ...
           @@ -612,6 +633,10 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
           {
             ssize_t ret;
@@ -518,9 +519,10 @@ jobs:
             return ret;
           }
           diff --git a/fs/stat.c b/fs/stat.c
+          index 7777777..8888888 100644
           --- a/fs/stat.c
           +++ b/fs/stat.c
-          @@ -1,5 +1,26 @@
+          @@ -1,12 +1,33 @@
           #include <linux/fs.h>
           #include <linux/stat.h>
           #include <linux/syscalls.h>
@@ -550,6 +552,7 @@ jobs:
           
           /*
             * For backward compatibility?  This one has the "automagically set the
+            * "real" owner of the file, if possible" logic.
           @@ -506,6 +527,10 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
           {
             struct kstat stat;
@@ -573,6 +576,7 @@ jobs:
             if (error)
               return error;
           diff --git a/drivers/input/input.c b/drivers/input/input.c
+          index 9999999..aaaaaaa 100644
           --- a/drivers/input/input.c
           +++ b/drivers/input/input.c
           @@ -8,6 +8,28 @@
@@ -615,6 +619,7 @@ jobs:
             if (is_event_supported(type, dev->evbit, EV_MAX)) {
           
           diff --git a/drivers/tty/pty.c b/drivers/tty/pty.c
+          index bbbbbbb..ccccccc 100644
           --- a/drivers/tty/pty.c
           +++ b/drivers/tty/pty.c
           @@ -9,6 +9,28 @@
@@ -657,18 +662,18 @@ jobs:
             struct tty_struct *tty;
           
             mutex_lock(&devpts_mutex);
-          EOF
 
-          # 应用修复后的补丁
-          if patch --dry-run -p1 < tracepoint-fixed.patch; then
-              echo "修复后的Patch检查通过，开始应用..."
-              patch -p1 < tracepoint-fixed.patch
+          PATCH
+          sed -i 's/\r$//' tracepoint-6.6-full-for-p1.patch
+          if patch --dry-run -p1 < tracepoint-6.6-full-for-p1.patch; then
+            echo "Patch检查通过，开始应用..."
+            patch -p1 < tracepoint-6.6-full-for-p1.patch
           else
-              echo "修复后的Patch仍然失败，尝试使用fuzz参数..."
-              patch -p1 -F 3 --fuzz=5 < tracepoint-fixed.patch || echo "Patch应用失败，跳过此patch"
+            echo "Patch检查失败"
+            exit 1
           fi
 
-          echo "完成"
+
 
       - name: 🔧 Cache HMBird patch (缓存HMBird补丁)
         uses: actions/cache@v3
