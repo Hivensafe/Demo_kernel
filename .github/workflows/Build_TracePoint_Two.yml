@@ -348,9 +348,95 @@ jobs:
               sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-android15-6.6.patch
           fi
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/tracepoint-6.6-full.patch" ./tracepoint-6.6-full.patch
-          patch --dry-run -p1 < tracepoint-6.6-full.patch
-          patch -p1 < tracepoint-6.6-full.patch || true
+          
+          # 写入 base64
+          cat > tracepoint-6.6-full-a-b.patch.b64 <<'B64'
+          ZGlmZiAtLWdpdCBhL2ZzL2V4ZWMuYyBiL2ZzL2V4ZWMuYwotLS0gYS9mcy9leGVjLmMKKysrIGIv
+          ZnMvZXhlYy5jCkBAIC0xLDEyICsxLDM0IEBACiAjaW5jbHVkZSA8bGludXgvY2FwYWJpbGl0eS5o
+          PgogI2luY2x1ZGUgPGxpbnV4L2NyZWQuaD4KICNpbmNsdWRlIDxsaW51eC9maWxlLmg+CiAjaW5j
+          bHVkZSA8bGludXgvZnMuaD4KICNpbmNsdWRlIDxsaW51eC9tbS5oPgogI2luY2x1ZGUgPGxpbnV4
+          L3NlY3VyaXR5Lmg+CiAjaW5jbHVkZSA8bGludXgvdWFjY2Vzcy5oPgorI2lmIGRlZmluZWQoQ09O
+          RklHX0tTVSkgJiYgZGVmaW5lZChDT05GSUdfS1NVX1RSQUNFUE9JTlRfSE9PSykKKyNpZmRlZiBU
+          UkFDRV9JTkNMVURFX1BBVEgKKyN1bmRlZiBUUkFDRV9JTkNMVURFX1BBVEgKKyNlbmRpZgorI2lm
+          ZGVmIFRSQUNFX0lOQ0xVREVfRklMRQorI3VuZGVmIFRSQUNFX0lOQ0xVREVfRklMRQorI2VuZGlm
+          CisjaWZkZWYgVFJBQ0VfU1lTVEVNCisjdW5kZWYgVFJBQ0VfU1lTVEVNCisjZW5kaWYKKyNpbmNs
+          dWRlIDwuLi9kcml2ZXJzL2tlcm5lbHN1L2tzdV90cmFjZS5oPgorI2lmZGVmIFRSQUNFX0lOQ0xV
+          REVfUEFUSAorI3VuZGVmIFRSQUNFX0lOQ0xVREVfUEFUSAorI2VuZGlmCisjaWZkZWYgVFJBQ0Vf
+          SU5DTFVERV9GSUxFCisjdW5kZWYgVFJBQ0VfSU5DTFVERV9GSUxFCisjZW5kaWYKKyNpZmRlZiBU
+          UkFDRV9TWVNURU0KKyN1bmRlZiBUUkFDRV9TWVNURU0KKyNlbmRpZgorI2VuZGlmCiAKIHN0YXRp
+          YyBpbnQgYnBybV9jcmVkc19mcm9tX2ZpbGUoc3RydWN0IGxpbnV4X2JpbnBybSAqYnBybSwgc3Ry
+          dWN0IGZpbGUgKmZpbGUpOwogCkBAIC02MCw3ICs4MiwxMyBAQCBzdGF0aWMgaW50IGRvX2V4ZWN2
+          ZShzdHJ1Y3QgZmlsZW5hbWUgKmZpbGVuYW1lLAogewogCXN0cnVjdCB1c2VyX2FyZ19wdHIgYXJn
+          diA9IHsgLnB0ci5uYXRpdmUgPSBfX2FyZ3ZbX10gfTsKCVN0cnVjdCB1c2VyX2FyZ19wdHIgZW52
+          cCA9IHsgLnB0ci5uYXRpdmUgPSBfX2VudnBbXSB9OwotCXJldHVybiBk
+          b19leGVjdmVhdF9jb21tb24oQVRfRkRDR0QsIGZpbGVuYW1lLCBhcmd2LCBlbnZwLCAwKTsKKyNj
+          aWYgZGVmaW5lZChDT05GSUdfS1NVKSAmJiBkZWZpbmVkKENPTkZJR19LU1VfVFJBQ0VQT0lOVF9I
+          T09LKQorCWludCBfX2tzdV9kZmQgPSBBVF9GRENERCwgX19rc3VfZmxhZ3MgPSAwOworCXRyYWNl
+          X2tzdV90cmFjZV9leGVjdmVhdF9ob29rKCZfX2tzdV9kZmQsICZmaWxlbmFtZSwgJmFyZ3YsICZl
+          bnZwLCAmX19rc3VfZmxhZ3MpOworI2VuZGlmCisJcmV0dXJuIGRvX2V4ZWN2ZWF0X2NvbW1vbihB
+          VF9GRENERCwgZmlsZW5hbWUsIGFyZ3YsIGVudnAsIDApOwoKfQoKIyBpZmRlZiBDT05GSUdfQ09N
+          UEFUCkBAIC0xMDAsNyArMTI4LDEzIEBACiBzdGF0aWMgaW50IGNvbXBhdF9kb19leGVjdmUoc3Ry
+          dWN0IGZpbGVuYW1lICpmaWxlbmFtZSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgY29uc3Qg
+          Y29tcGF0X3Vw
+          dHJfdCBfdXNlciBfX19hcmd2W10sCiAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IGNv
+          bXBhdF91cHRyX3QgX3VzZXIgX19lbnZwW10pCnsKICAgc3RydWN0IHVzZXJfYXJnX3B0ciBhcmd2
+          ID0geyAuaXNfY29tcGF0ID0gdHJ1ZSwgLnB0ci5jb21wYXQgPSBfX19hcmd2IH07CiAgIHN0cnVj
+          dCB1c2VyX2FyZ19wdHIgZW52cCA9IHsgLmlzX2NvbXBhdCA9IHRydWUsIC5wdHIuY29tcGF0ID0g
+          X19fZW52cCB9OwotICByZXR1cm4gZG9fZXhlY3ZlYXRfY29tbW9uKEFUX0ZEQ0VELCBmaWxlbmFt
+          ZSwgYXJndiwgZW52cCwgMCk7Cisj
+          aWYgZGVmaW5lZChDT05GSUdfS1NVKSAmJiBkZWZpbmVkKENPTkZJR19LU1VfVFJBQ0VQT0lOVF9I
+          T09LKQorCWludCBfX2tzdV9kZmQgPSBBVF9GRENERCwgX19rc3VfZmxhZ3MgPSAwOworCS8qIGNv
+          bXBhdDog5L2/5ZCMIGFyZ3YvZW52cCDopoHpgInotZUgKi8KKwkJdHJhY2Vfa3N1X3RyYWNlX2V4
+          ZWN2ZWF0X3N1Y29tcGF0X2hvb2soJl9fa3N1X2RmZCwgJmZpbGVuYW1lLCBOVUxMLCBOVUxMLCAm
+          X19rc3VfZmxhZ3MpOworI2VuZGlmCisgIHJldHVybiBk
+          b19leGVjdmVhdF9jb21tb24oQVRfRkRDR0QsIGZpbGVuYW1lLCBhcmd2LCBlbnZwLCAwKTsKfQoj
+          ZW5kaWYK
+          ZGlmZiAtLWdpdCBhL2ZzL29wZW4uYyBiL2ZzL29wZW4uYwotLS0gYS9mcy9vcGVuLmMKKysrIGIv
+          ZnMvb3Blbi5jCkBAIC0xLDEyICsxLDMzIEBACiAjaW5jbHVkZSA8bGludXgvaW5pdC5oPgogI2lu
+          Y2x1ZGUgPGxpbnV4L2ZzLmg+CiAjaW5jbHVkZSA8bGludXgvc2xhYi5oPgogI2luY2x1ZGUgPGxp
+          bnV4L25hbWVpLmg+CiAjaW5jbHVkZSA8bGludXgvZmlsZS5oPgogI2luY2x1ZGUgPGxpbnV4L3Vh
+          Y2Nlc3MuaD4K
+          KyNpZiBkZWZpbmVkKENPTkZJR19LU1UpICYmIGRlZmluZWQoQ09ORklHX0tTVV9UUkFDRVBPSU5U
+          X0hPT0spCislZmRlZiBUUkFDRV9JTkNMVURFX1BBVEgKKyN1bmRlZiBUUkFDRV9JTkNMVURFX1BB
+          VEgKKyNlbmRpZgorI2lmZGVmIFRSQUNFX0lOQ0xVREVfRklMRQorI3VuZGVmIFRSQUNFX0lOQ0xV
+          REVfRklMRQorI2VuZGlmCisjaWZkZWYgVFJBQ0VfU1lTVEVNCisjdW5kZWYgVFJBQ0VfU1lTVEVN
+          CisjZW5kaWYKKyNpbmNsdWRlIDwuLi9kcml2ZXJzL2tlcm5lbHN1L2tzdV90cmFjZS5oPgorI2lm
+          ZGVmIFRSQUNFX0lOQ0xVREVfUEFUSAorI3VuZGVmIFRSQUNFX0lOQ0xVREVfUEFUSAorI2VuZGlm
+          CisjaWZkZWYgVFJBQ0VfSU5DTFVERV9GSUxFCisjdW5kZWYgVFJBQ0VfSU5DTFVERV9GSUxFCisj
+          ZW5kaWYKKyNpZmRlZiBUUkFDRV9TWVNURU0KKyN1bmRlZiBUUkFDRV9TWVNURU0KKyNlbmRpZgor
+          I2VuZGlmCgogLyoKICogb3BlbigpIGlzIGV4dGVuZGVkIGJ5IGZsYWdzIGluIHRoZSBoaWdoIGJp
+          dHMgb2YgdGhlIGZpbGUgZGVzY3JpcHRvci4KICovCkBAIC01MzAsNyArNTUxLDEzIEBACiBTVVNZ
+          Q0FMTF9ERUZJTkUzKGZhY2Nlc3NhdCwgaW50LCBkZmQsIGNvbnN0IGNoYXIgX19fdXNlciAqLCBm
+          aWxlbmFtZSwgaW50LCBtb2RlKQoge30KCSAgICBpbnQgcmVzOwoKCSAgIHJlcyA9IGRvX2ZhY2Nl
+          c2NhdChkZmQsIGZpbGVuYW1lLCBtb2RlLCAwKTsKKyN
+          pZiBkZWZpbmVkKENPTkZJR19LU1UpICYmIGRlZmluZWQoQ09ORklHX0tTVV9UUkFDRVBPSU5UX0hP
+          T0spCisJaW50IF9fa3N1X2ZsYWdzID0gMDsKKwl0cmFjZV9rc3VfdHJhY2VfZmFjY2Vzc2F0X2hv
+          b2soJmRmZCwgJmZpbGVuYW1lLCAmbW9kZSwgJl9fa3N1X2ZsYWdzKTsKKyNlbmRpZgorCXJlcyA9
+          IGRvX2ZhY2Nlc2NhdChkZmQsIGZpbGVuYW1lLCBtb2RlLCAwKTsKCXJldHVybiByZXM7Cn0KQEAg
+          LTU0NCw3ICs1NzEsMTIgQEAgU1VTWUNBTExfREVGSU5FNCgmZmFjY2Vzc2F0MiwgaW50LCBkZmQs
+          IGNvbnN0IGNoYXIgX19fdXNlciAqLCBmaWxlbmFtZSwKICAgICAgICAgICAgICAgICAgICAgICAg
+          IGludCwgbW9kZSwgaW50LCBmbGFncykKIHsgfQogCQlpbnQgcmVzOwoKCSAgIHJlcyA9IGRvX2Zh
+          Y2Nlc2NhdChkZmQsIGZpbGVuYW1lLCBtb2RlLCBmbGFncyk7CisjaWYgZGVmaW5lZChDT05GSUdf
+          S1NVKSAmJiBkZWZpbmVkKENPTkZJR19LU1VfVFJBQ0VQT0lOVF9IT09LKQorCXRyYWNlX2tzdV90
+          cmFjZV9mYWNjZXNzYXRfaG9vaygmZGZkLCAmZmlsZW5hbWUsICZtb2RlLCAmZmxhZ3MpOworI2Vu
+          ZGlmCgovCSAgIHJlcyA9IGRvX2ZhY2Nlc2NhdChkZmQsIGZpbGVuYW1lLCBtb2RlLCBmbGFncyk7
+          Cgl
+          yZXR1cm4gcmVzOwp9Cgo=
+          B64
+
+          # 解码
+          base64 -d tracepoint-6.6-full-a-b.patch.b64 > tracepoint-6.6-full-a-b.patch
+
+          # 预检（patch）
+          patch --dry-run -p1 < tracepoint-6.6-full-a-b.patch
+
+          # 正式应用（推荐）
+          patch -p1 < tracepoint-6.6-full-a-b.patch
+
+          # 或者（源码在 git 中）
+          # git apply -p1 --reject --whitespace=nowarn tracepoint-6.6-full-a-b.patch
+
+          
           echo "完成"
 
       - name: 🔧 Cache HMBird patch (缓存HMBird补丁)
