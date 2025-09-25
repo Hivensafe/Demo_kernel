@@ -540,6 +540,12 @@ jobs:
           grep -RIn "trace_ksu_trace_.*_hook" fs drivers | sort
           note "检查完毕，开始修复su"
           cp "${GITHUB_WORKSPACE}/.github/workflows/tools/ksu-trace-fixes-6.6.patch" ./ksu-trace-fixes-6.6.patch
+          test -d drivers/kernelsu && echo "drivers/kernelsu 存在" || echo "不存在"
+          note "尝试p1检查 ksu-trace-fixes-6.6.patch"
+          patch --dry-run -p1 ksu-trace-fixes-6.6.patch
+          note "尝试p0检查 ksu-trace-fixes-6.6.patch"
+          patch --dry-run -p0 ksu-trace-fixes-6.6.patch
+          note "应用 ksu-trace-fixes-6.6.patch"
           patch -p1 < ksu-trace-fixes-6.6.patch || true
 
 
