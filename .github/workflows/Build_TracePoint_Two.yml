@@ -350,221 +350,271 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           # cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
           # patch -p1 -F 3 < syscall_hooks.patch
-          echo ">>> 内联注入 Tracepoint（适配 6.6，幂等可复跑）"
+                    
+              set -euo pipefail
 
-          set -euo pipefail
-
-          add_include_guarded() {
-            local f="$1"
-            local hdr='#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+              ############################################
+              # helpers
+              ############################################
+              add_include_guarded() {
+                local f="$1"
+                local hdr='#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          #ifdef TRACE_INCLUDE_PATH
+          #undef TRACE_INCLUDE_PATH
+          #endif
+          #ifdef TRACE_INCLUDE_FILE
+          #undef TRACE_INCLUDE_FILE
+          #endif
+          #ifdef TRACE_SYSTEM
+          #undef TRACE_SYSTEM
+          #endif
           #include <../drivers/kernelsu/ksu_trace.h>
+          #ifdef TRACE_INCLUDE_PATH
+          #undef TRACE_INCLUDE_PATH
+          #endif
+          #ifdef TRACE_INCLUDE_FILE
+          #undef TRACE_INCLUDE_FILE
+          #endif
+          #ifdef TRACE_SYSTEM
+          #undef TRACE_SYSTEM
+          #endif
           #endif'
-            # 已存在则跳过
-            grep -q 'drivers/kernelsu/ksu_trace.h' "$f" && return 0
-            # 优先插在 <linux/uaccess.h> 之后；若无，则插在最后一个 #include 之后
-            if grep -n '^[[:space:]]*#include[[:space:]]*<linux/uaccess.h>' "$f" >/dev/null; then
-              awk -v add="$hdr" '
-                BEGIN{added=0}
-                {print}
-                $0 ~ /^[[:space:]]*#include[[:space:]]*<linux\/uaccess\.h>/ && !added {print add; added=1}
-              ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-            else
-              awk -v add="$hdr" '
-                BEGIN{last=0}
-                /^[[:space:]]*#include[[:space:]]*<.*>/{last=NR}
-                {lines[NR]=$0}
-                END{
-                  for(i=1;i<=NR;i++){
-                    print lines[i]
-                    if(i==last){print add}
-                  }
-                }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-            fi
-          }
+                [[ -f "$f" ]] || return 0
+                # 已包含则跳过
+                if grep -q 'drivers/kernelsu/ksu_trace.h' "$f"; then
+                  return 0
+                fi
+                # 插在最后一个 #include 之后（更通用，避免依赖特定头）
+                awk -v add="$hdr" '
+                  BEGIN{last=0}
+                  /^[[:space:]]*#include[[:space:]]*<.*>/{last=NR}
+                  {buf[NR]=$0}
+                  END{
+                    for(i=1;i<=NR;i++){
+                      print buf[i]
+                      if(i==last){print add}
+                    }
+                    if(last==0){print add} # 如果源文件没有任何 #include，就放文件最开头（紧随原内容）
+                  }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+              }
 
-          inject_exec() {
-            local f=fs/exec.c
-            [[ -f $f ]] || return 0
-            add_include_guarded "$f"
+              ############################################
+              # exec hooks
+              ############################################
+              inject_exec() {
+                local f=fs/exec.c
+                [[ -f $f ]] || return 0
+                add_include_guarded "$f"
 
-            # do_execve: 在 return do_execveat_common(...) 之前插入 hook（若未插入）
-            if ! grep -q 'trace_ksu_trace_execveat_hook' "$f"; then
-              perl -0777 -i -pe '
-                s{
-                  (static\s+int\s+do_execve\s*\([^)]*\)\s*\{.*?)
-                  (\breturn\s+do_execveat_common\s*\()
-                }{
-                  $1
-                  "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
-                  "    int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;\n".
-                  "    trace_ksu_trace_execveat_hook(&__ksu_dfd, &filename, &argv, &envp, &__ksu_flags);\n".
-                  "#endif\n".
-                  $2
-                }sx
-              ' "$f"
-            fi
+                # do_execve: 在 return do_execveat_common(...) 前插入
+                if ! grep -q 'trace_ksu_trace_execveat_hook' "$f"; then
+                  perl -0777 -i -pe '
+                    s{
+                      (static\s+int\s+do_execve\s*\([^)]*\)\s*\{ .*?)
+                      (\breturn\s+do_execveat_common\s*\()
+                    }{
+                      $1
+                      "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
+                      "    int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;\n".
+                      "    trace_ksu_trace_execveat_hook(&__ksu_dfd, &filename, &argv, &envp, &__ksu_flags);\n".
+                      "#endif\n".
+                      $2
+                    }gsx
+                  ' "$f"
+                fi
 
-            # compat_do_execve: 同理插入 sucompat hook
-            if ! grep -q 'trace_ksu_trace_execveat_sucompat_hook' "$f"; then
-              perl -0777 -i -pe '
-                s{
-                  (static\s+int\s+compat_do_execve\s*\([^)]*\)\s*\{.*?)
-                  (\breturn\s+do_execveat_common\s*\()
-                }{
-                  $1
-                  "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
-                  "    int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;\n".
-                  "    /* compat: 不传 argv/envp 指针，避免误解引用 */\n".
-                  "    trace_ksu_trace_execveat_sucompat_hook(&__ksu_dfd, &filename, NULL, NULL, &__ksu_flags);\n".
-                  "#endif\n".
-                  $2
-                }sx
-              ' "$f"
-            fi
-          }
+                # compat_do_execve: sucompat hook
+                if ! grep -q 'trace_ksu_trace_execveat_sucompat_hook' "$f"; then
+                  perl -0777 -i -pe '
+                    s{
+                      (static\s+int\s+compat_do_execve\s*\([^)]*\)\s*\{ .*?)
+                      (\breturn\s+do_execveat_common\s*\()
+                    }{
+                      $1
+                      "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
+                      "    int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;\n".
+                      "    /* compat: 不传 argv/envp 指针，避免误解引用 */\n".
+                      "    trace_ksu_trace_execveat_sucompat_hook(&__ksu_dfd, &filename, NULL, NULL, &__ksu_flags);\n".
+                      "#endif\n".
+                      $2
+                    }gsx
+                  ' "$f"
+                fi
+              }
 
-          inject_open() {
-            local f=fs/open.c
-            [[ -f $f ]] || return 0
-            add_include_guarded "$f"
+              ############################################
+              # open hooks (faccessat / faccessat2)
+              ############################################
+              inject_open() {
+                local f=fs/open.c
+                [[ -f $f ]] || return 0
+                add_include_guarded "$f"
 
-            # faccessat: 在 do_faccessat(...) 前插入 hook
-            if ! grep -q 'trace_ksu_trace_faccessat_hook' "$f"; then
-              perl -0777 -i -pe '
-                s{
-                  (SYSCALL_DEFINE3\s*\(\s*faccessat\b[^)]*\)\s*\{.*?\n)
-                  ([ \t]*)(res\s*=\s*do_faccessat\s*\(\s*dfd\s*,\s*filename\s*,\s*mode\s*,\s*0\s*\)\s*;)
-                }{
-                  $1.
-                  "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
-                  "    int __ksu_flags = 0;\n".
-                  "    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &__ksu_flags);\n".
-                  "#endif\n".
-                  $2.$3
-                }sx
-              ' "$f" || true
-            fi
+                # faccessat: 兼容两种写法（res=do_faccessat 或 return do_faccessat）
+                if ! grep -q 'trace_ksu_trace_faccessat_hook' "$f"; then
+                  perl -0777 -i -pe '
+                    s{
+                      (SYSCALL_DEFINE3\s*\(\s*faccessat\b[^)]*\)\s*\{ .*?)
+                      (\b(res\s*=\s*do_faccessat\s*\(\s*dfd\s*,\s*filename\s*,\s*mode\s*,\s*0\s*\)\s*;|
+                        return\s+do_faccessat\s*\(\s*dfd\s*,\s*filename\s*,\s*mode\s*,\s*0\s*\)\s*;))
+                    }{
+                      $1
+                      "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
+                      "    int __ksu_flags = 0;\n".
+                      "    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &__ksu_flags);\n".
+                      "#endif\n".
+                      $2
+                    }gsx
+                  ' "$f" || true
+                fi
 
-            # faccessat2: 在 do_faccessat(..., flags) 前插入 hook
-            perl -0777 -i -pe '
-              s{
-                (SYSCALL_DEFINE4\s*\(\s*faccessat2\b[^)]*\)\s*\{.*?\n)
-                ([ \t]*)(res\s*=\s*do_faccessat\s*\(\s*dfd\s*,\s*filename\s*,\s*mode\s*,\s*flags\s*\)\s*;)
-              }{
-                $1.
-                "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
-                "    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &flags);\n".
-                "#endif\n".
-                $2.$3
-              }sx
-            ' "$f" || true
-          }
+                # faccessat2: 在 do_faccessat(..., flags) 前
+                perl -0777 -i -pe '
+                  s{
+                    (SYSCALL_DEFINE4\s*\(\s*faccessat2\b[^)]*\)\s*\{ .*?)
+                    (\b(res\s*=\s*do_faccessat\s*\(\s*dfd\s*,\s*filename\s*,\s*mode\s*,\s*flags\s*\)\s*;|
+                      return\s+do_faccessat\s*\(\s*dfd\s*,\s*filename\s*,\s*mode\s*,\s*flags\s*\)\s*;))
+                  }{
+                    $1
+                    "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
+                    "    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &flags);\n".
+                    "#endif\n".
+                    $2
+                  }gsx
+                ' "$f" || true
+              }
 
-          inject_read() {
-            local f=fs/read_write.c
-            [[ -f $f ]] || return 0
-            add_include_guarded "$f"
+              ############################################
+              # read hook
+              ############################################
+              inject_read() {
+                local f=fs/read_write.c
+                [[ -f $f ]] || return 0
+                add_include_guarded "$f"
 
-            # 在 ksys_read 前插入 hook（若未插入）
-            if ! grep -q 'trace_ksu_trace_sys_read_hook' "$f"; then
-              perl -0777 -i -pe '
-                s{
-                  (SYSCALL_DEFINE3\s*\(\s*read\b[^)]*\)\s*\{.*?\n)
-                  ([ \t]*)(ret\s*=\s*ksys_read\s*\(|return\s+ksys_read\s*\()
-                }{
-                  $1.
-                  "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
-                  "    trace_ksu_trace_sys_read_hook(fd, &buf, &count);\n".
-                  "#endif\n".
-                  $2.$3
-                }sx
-              ' "$f"
-            fi
-          }
+                if ! grep -q 'trace_ksu_trace_sys_read_hook' "$f"; then
+                  perl -0777 -i -pe '
+                    s{
+                      (SYSCALL_DEFINE3\s*\(\s*read\b[^)]*\)\s*\{ .*?)
+                      (\b(ret\s*=\s*ksys_read\s*\(|return\s+ksys_read\s*\())
+                    }{
+                      $1
+                      "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
+                      "    trace_ksu_trace_sys_read_hook(fd, &buf, &count);\n".
+                      "#endif\n".
+                      $2
+                    }gsx
+                  ' "$f"
+                fi
+              }
 
-          inject_stat() {
-            local f=fs/stat.c
-            [[ -f $f ]] || return 0
-            add_include_guarded "$f"
+              ############################################
+              # stat hooks (newfstatat + compat)
+              ############################################
+              inject_stat() {
+                local f=fs/stat.c
+                [[ -f $f ]] || return 0
+                add_include_guarded "$f"
 
-            # newfstatat: 在 vfs_fstatat 前插入
-            if ! grep -q 'trace_ksu_trace_stat_hook' "$f"; then
-              perl -0777 -i -pe '
-                s{
-                  (SYSCALL_DEFINE4\s*\(\s*newfstatat\b[^)]*\)\s*\{.*?\n\s*struct\s+kstat\s+stat;\s*\n\s*int\s+error;\s*\n)
-                }{
-                  $1.
-                  "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
-                  "    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);\n".
-                  "#endif\n"
-                }sx
-              ' "$f"
-            fi
+                # newfstatat: 在 vfs_fstatat 前；落在声明之后也可
+                if ! grep -q 'trace_ksu_trace_stat_hook' "$f"; then
+                  perl -0777 -i -pe '
+                    s{
+                      (SYSCALL_DEFINE4\s*\(\s*newfstatat\b[^)]*\)\s*\{\s*?\n
+                      \s*struct\s+kstat\s+stat\s*;\s*\n
+                      \s*int\s+error\s*;\s*\n)
+                    }{
+                      $1
+                      "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
+                      "    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);\n".
+                      "#endif\n"
+                    }gsx
+                  ' "$f"
+                fi
 
-            # compat newfstatat: 同理
-            perl -0777 -i -pe '
-              s{
-                (COMPAT_SYSCALL_DEFINE4\s*\(\s*newfstatat\b[^)]*\)\s*\{.*?\n\s*struct\s+kstat\s+stat;\s*\n\s*int\s+error;\s*\n)
-              }{
-                $1.
-                "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
-                "    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);\n".
-                "#endif\n"
-              }sx
-            ' "$f" || true
-          }
+                # compat newfstatat: 同理
+                perl -0777 -i -pe '
+                  s{
+                    (COMPAT_SYSCALL_DEFINE4\s*\(\s*newfstatat\b[^)]*\)\s*\{\s*?\n
+                    \s*struct\s+kstat\s+stat\s*;\s*\n
+                    \s*int\s+error\s*;\s*\n)
+                  }{
+                    $1
+                    "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n".
+                    "    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);\n".
+                    "#endif\n"
+                  }gsx
+                ' "$f" || true
+              }
 
-          inject_input() {
-            local f=drivers/input/input.c
-            [[ -f $f ]] || return 0
-            add_include_guarded "$f"
-            # 在 input_event() 开头、加锁前插入（需宏 CONFIG_KSU_TRACEPOINT_HOOK_INPUT）
-            if ! grep -q 'trace_ksu_trace_input_hook' "$f"; then
-              perl -0777 -i -pe '
-                s{
-                  (void\s+input_event\s*\(\s*struct\s+input_dev\s*\*\s*dev\s*,\s*unsigned\s+int\s+type\s*,\s*unsigned\s+int\s+code\s*,\s*int\s+value\s*\)\s*\{\s*)
-                }{
-                  $1.
-                  "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KSU_TRACEPOINT_HOOK_INPUT)\n".
-                  "    /* call before spinlock; handler must not sleep */\n".
-                  "    trace_ksu_trace_input_hook(&type, &code, &value);\n".
-                  "#endif\n"
-                }sx
-              ' "$f"
-            fi
-          }
+              ############################################
+              # input hook (可选，需 Kconfig: CONFIG_KSU_TRACEPOINT_HOOK_INPUT=y)
+              ############################################
+              inject_input() {
+                local f=drivers/input/input.c
+                [[ -f $f ]] || return 0
+                add_include_guarded "$f"
 
-          inject_pty() {
-            local f=drivers/tty/pty.c
-            [[ -f $f ]] || return 0
-            add_include_guarded "$f"
-            # 在 pts_unix98_lookup() 开头插入（需宏 CONFIG_KSU_TRACEPOINT_HOOK_DEVPTS）
-            if ! grep -q 'trace_ksu_trace_devpts_hook' "$f"; then
-              perl -0777 -i -pe '
-                s{
-                  (static\s+struct\s+tty_struct\s*\*\s*pts_unix98_lookup\s*\(\s*struct\s+tty_driver\s*\*\s*driver\s*,\s*struct\s+file\s*\*\s*file\s*,\s*int\s+idx\s*\)\s*\{\s*)
-                }{
-                  $1.
-                  "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KSU_TRACEPOINT_HOOK_DEVPTS)\n".
-                  "    /* extremely lightweight; do not sleep */\n".
-                  "    trace_ksu_trace_devpts_hook(&driver, &file, &idx);\n".
-                  "#endif\n"
-                }sx
-              ' "$f"
-            fi
-          }
+                if ! grep -q 'trace_ksu_trace_input_hook' "$f"; then
+                  perl -0777 -i -pe '
+                    s{
+                      (void\s+input_event\s*\(\s*struct\s+input_dev\s*\*\s*dev\s*,\s*unsigned\s+int\s+type\s*,\s*unsigned\s+int\s+code\s*,\s*int\s+value\s*\)\s*\{\s*)
+                    }{
+                      $1
+                      "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KSU_TRACEPOINT_HOOK_INPUT)\n".
+                      "    /* call before spinlock; handler must not sleep */\n".
+                      "    trace_ksu_trace_input_hook(&type, &code, &value);\n".
+                      "#endif\n"
+                    }gsx
+                  ' "$f"
+                fi
+              }
 
-          inject_exec
-          inject_open
-          inject_read
-          inject_stat
-          inject_input
-          inject_pty
+              ############################################
+              # pty hook (可选，需 Kconfig: CONFIG_KSU_TRACEPOINT_HOOK_DEVPTS=y)
+              ############################################
+              inject_pty() {
+                local f=drivers/tty/pty.c
+                [[ -f $f ]] || return 0
+                add_include_guarded "$f"
 
-          echo ">>> 自检 tracepoint 符号落点..."
-          grep -RIn "trace_ksu_trace_.*_hook" fs drivers || { echo "❌ 未发现插点，请检查"; exit 1; }
-          echo "✅ Tracepoint 内联注入完成（6.6 稳健，幂等）"
+                if ! grep -q 'trace_ksu_trace_devpts_hook' "$f"; then
+                  perl -0777 -i -pe '
+                    s{
+                      (static\s+struct\s+tty_struct\s*\*\s*pts_unix98_lookup\s*\(\s*struct\s+tty_driver\s*\*\s*driver\s*,\s*struct\s+file\s*\*\s*file\s*,\s*int\s+idx\s*\)\s*\{\s*)
+                    }{
+                      $1
+                      "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KSU_TRACEPOINT_HOOK_DEVPTS)\n".
+                      "    /* extremely lightweight; do not sleep */\n".
+                      "    trace_ksu_trace_devpts_hook(&driver, &file, &idx);\n".
+                      "#endif\n"
+                    }gsx
+                  ' "$f"
+                fi
+              }
 
+              ############################################
+              # run injections
+              ############################################
+              echo ">>> Injecting hooks..."
+              inject_exec
+              inject_open
+              inject_read
+              inject_stat
+              inject_input
+              inject_pty
+
+              echo ">>> Verifying inserted call sites..."
+              # syscall 4 处必须出现
+              grep -RIn "trace_ksu_trace_execveat_hook" fs || { echo "❌ exec hook missing"; exit 1; }
+              grep -RIn "trace_ksu_trace_faccessat_hook" fs || { echo "❌ faccessat hook missing"; exit 1; }
+              grep -RIn "trace_ksu_trace_sys_read_hook" fs || { echo "❌ read hook missing"; exit 1; }
+              grep -RIn "trace_ksu_trace_stat_hook" fs || { echo "❌ stat hook missing"; exit 1; }
+              # 可选两处（仅提示，不强制）
+              grep -RIn "trace_ksu_trace_input_hook" drivers || echo "ℹ️ input hook present only if Kconfig enabled"
+              grep -RIn "trace_ksu_trace_devpts_hook" drivers || echo "ℹ️ devpts hook present only if Kconfig enabled"
+
+              echo "✅ Tracepoint inline injection completed (6.6-safe, idempotent)"
 
           echo "完成"
       - name: 🔍 Sanity check for stray patch headers
