@@ -349,6 +349,7 @@ jobs:
           fi
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           cp "${GITHUB_WORKSPACE}/.github/workflows/tools/tracepoint-6.6-full.patch" ./tracepoint-6.6-full.patch
+          sed -i 's/\r$//' tracepoint-6.6-full-stable.patch
           patch --dry-run -p1 < tracepoint-6.6-full.patch
           patch -p1 < tracepoint-6.6-full.patch || true
           echo "完成"
