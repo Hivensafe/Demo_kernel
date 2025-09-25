@@ -9,6 +9,8 @@ on:
         required: true
         default: 'Build_security_BBG'
         options:
+          - Build_TracePoint_test
+          - Build_TracePoint_Two
           - Build_security_BBG
           - Encrypt_script
       count:
