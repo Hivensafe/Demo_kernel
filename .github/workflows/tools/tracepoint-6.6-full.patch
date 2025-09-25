@@ -1,7 +1,6 @@
-diff --git a/fs/exec.c b/fs/exec.c
---- a/fs/exec.c
-+++ b/fs/exec.c
-@@ -1,14 +1,36 @@
+--- fs/exec.c
++++ fs/exec.c
+@@ -1,12 +1,34 @@
  #include <linux/capability.h>
  #include <linux/cred.h>
  #include <linux/file.h>
@@ -60,9 +59,8 @@ diff --git a/fs/exec.c b/fs/exec.c
  }
  #endif /* CONFIG_COMPAT */
  
-diff --git a/fs/open.c b/fs/open.c
---- a/fs/open.c
-+++ b/fs/open.c
+--- fs/open.c
++++ fs/open.c
 @@ -1,12 +1,33 @@
  #include <linux/init.h>
  #include <linux/fs.h>
@@ -119,9 +117,8 @@ diff --git a/fs/open.c b/fs/open.c
  	return res;
  }
  
-diff --git a/fs/read_write.c b/fs/read_write.c
---- a/fs/read_write.c
-+++ b/fs/read_write.c
+--- fs/read_write.c
++++ fs/read_write.c
 @@ -1,12 +1,33 @@
  #include <linux/fs.h>
  #include <linux/mm.h>
@@ -164,9 +161,8 @@ diff --git a/fs/read_write.c b/fs/read_write.c
  	ret = ksys_read(fd, buf, count);
  	return ret;
  }
-diff --git a/fs/stat.c b/fs/stat.c
---- a/fs/stat.c
-+++ b/fs/stat.c
+--- fs/stat.c
++++ fs/stat.c
 @@ -1,12 +1,33 @@
  #include <linux/fs.h>
  #include <linux/stat.h>
@@ -220,9 +216,8 @@ diff --git a/fs/stat.c b/fs/stat.c
  	error = vfs_fstatat(dfd, filename, &stat, flag);
  	if (error)
  		return error;
-diff --git a/drivers/input/input.c b/drivers/input/input.c
---- a/drivers/input/input.c
-+++ b/drivers/input/input.c
+--- drivers/input/input.c
++++ drivers/input/input.c
 @@ -8,6 +8,28 @@
  #define pr_fmt(fmt) KBUILD_BASENAME ": " fmt
  
@@ -262,9 +257,8 @@ diff --git a/drivers/input/input.c b/drivers/input/input.c
 +
  	if (is_event_supported(type, dev->evbit, EV_MAX)) {
  
-diff --git a/drivers/tty/pty.c b/drivers/tty/pty.c
---- a/drivers/tty/pty.c
-+++ b/drivers/tty/pty.c
+--- drivers/tty/pty.c
++++ drivers/tty/pty.c
 @@ -9,6 +9,28 @@
  #include <linux/tty_driver.h>
  #include <linux/serial.h>
