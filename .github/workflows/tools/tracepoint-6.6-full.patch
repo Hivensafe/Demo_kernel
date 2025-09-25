@@ -1,7 +1,7 @@
 diff --git a/fs/exec.c b/fs/exec.c
 --- a/fs/exec.c
 +++ b/fs/exec.c
-@@ -1,12 +1,34 @@
+@@ -1,14 +1,36 @@
  #include <linux/capability.h>
  #include <linux/cred.h>
  #include <linux/file.h>
@@ -30,33 +30,36 @@ diff --git a/fs/exec.c b/fs/exec.c
 +#undef TRACE_SYSTEM
 +#endif
 +#endif
-@@
- static int do_execve(struct filename *filename,
-                      const char __user *const __argv[],
-                      const char __user *const __envp[])
+ 
+ static int bprm_creds_from_file(struct linux_binprm *bprm, struct file *file);
+ 
+@@ -60,7 +82,13 @@ static int do_execve(struct filename *filename,
  {
-     struct user_arg_ptr argv = { .ptr.native = __argv };
-     struct user_arg_ptr envp = { .ptr.native = __envp };
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
+-	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-+    int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
-+    trace_ksu_trace_execveat_hook(&__ksu_dfd, &filename, &argv, &envp, &__ksu_flags);
++	int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
++	trace_ksu_trace_execveat_hook(&__ksu_dfd, &filename, &argv, &envp, &__ksu_flags);
 +#endif
-     return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
++	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
  }
-@@
- static int compat_do_execve(struct filename *filename,
-                             const compat_uptr_t __user *__argv,
-                             const compat_uptr_t __user *__envp)
+ 
+ #ifdef CONFIG_COMPAT
+@@ -100,7 +128,13 @@ static int compat_do_execve(struct filename *filename,
  {
-     struct user_arg_ptr argv = { .is_compat = true, .ptr.compat = __argv };
-     struct user_arg_ptr envp = { .is_compat = true, .ptr.compat = __envp };
+ 	struct user_arg_ptr argv = { .is_compat = true, .ptr.compat = __argv };
+ 	struct user_arg_ptr envp = { .is_compat = true, .ptr.compat = __envp };
+-	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-+    int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
-+    /* compat: 不传 argv/envp 指针，避免误解引用 */
-+    trace_ksu_trace_execveat_sucompat_hook(&__ksu_dfd, &filename, NULL, NULL, &__ksu_flags);
++	int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
++	/* compat: 不传 argv/envp 指针，避免误解引用 */
++	trace_ksu_trace_execveat_sucompat_hook(&__ksu_dfd, &filename, NULL, NULL, &__ksu_flags);
 +#endif
-     return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
++	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
  }
+ #endif /* CONFIG_COMPAT */
+ 
 diff --git a/fs/open.c b/fs/open.c
 --- a/fs/open.c
 +++ b/fs/open.c
@@ -88,24 +91,34 @@ diff --git a/fs/open.c b/fs/open.c
 +#undef TRACE_SYSTEM
 +#endif
 +#endif
-@@
- SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ 
+ /*
+  * open() is extended by flags in the high bits of the file descriptor.
+@@ -530,7 +551,13 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
  {
+ 	int res;
+ 
+-	res = do_faccessat(dfd, filename, mode, 0);
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-+    int __ksu_flags = 0;
-+    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &__ksu_flags);
++	int __ksu_flags = 0;
++	trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &__ksu_flags);
 +#endif
-     return do_faccessat(dfd, filename, mode, 0);
++	res = do_faccessat(dfd, filename, mode, 0);
+ 	return res;
  }
-@@
- SYSCALL_DEFINE4(faccessat2, int, dfd, const char __user *, filename,
-                 int, mode, int, flags)
+ 
+@@ -544,7 +571,12 @@ SYSCALL_DEFINE4(faccessat2, int, dfd, const char __user *, filename,
  {
+ 	int res;
+ 
+-	res = do_faccessat(dfd, filename, mode, flags);
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-+    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &flags);
++	trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &flags);
 +#endif
-     return do_faccessat(dfd, filename, mode, flags);
++	res = do_faccessat(dfd, filename, mode, flags);
+ 	return res;
  }
+ 
 diff --git a/fs/read_write.c b/fs/read_write.c
 --- a/fs/read_write.c
 +++ b/fs/read_write.c
@@ -136,13 +149,20 @@ diff --git a/fs/read_write.c b/fs/read_write.c
 +#undef TRACE_SYSTEM
 +#endif
 +#endif
-@@
- SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ 
+ /*
+  * rw_verify_area: checks that pos is >= 0, and that the read or write is
+  * going to a valid part of the file (that is, it fits in the file, ...
+@@ -612,6 +633,10 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
  {
+ 	ssize_t ret;
+ 
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-+    trace_ksu_trace_sys_read_hook(fd, &buf, &count);
++	trace_ksu_trace_sys_read_hook(fd, &buf, &count);
 +#endif
-     return ksys_read(fd, buf, count);
++
+ 	ret = ksys_read(fd, buf, count);
+ 	return ret;
  }
 diff --git a/fs/stat.c b/fs/stat.c
 --- a/fs/stat.c
@@ -174,46 +194,39 @@ diff --git a/fs/stat.c b/fs/stat.c
 +#undef TRACE_SYSTEM
 +#endif
 +#endif
-@@
- SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
-                 struct stat __user *, statbuf, int, flag)
+ 
+ /*
+  * For backward compatibility?  This one has the "automagically set the
+  * "real" owner of the file, if possible" logic.
+@@ -506,6 +527,10 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
  {
-     struct kstat stat;
-     int error;
+ 	struct kstat stat;
+ 	int error;
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-+    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
++	trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
 +#endif
-     error = vfs_fstatat(dfd, filename, &stat, flag);
-     if (error)
-         return error;
-@@
- COMPAT_SYSCALL_DEFINE4(newfstatat, unsigned int, dfd,
-                        const char __user *, filename,
-                        struct compat_stat __user *, statbuf, int, flag)
++
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -823,6 +848,10 @@ COMPAT_SYSCALL_DEFINE4(newfstatat, unsigned int, dfd,
  {
-     struct kstat stat;
-     int error;
+ 	struct kstat stat;
+ 	int error;
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-+    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
++	trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
 +#endif
-     error = vfs_fstatat(dfd, filename, &stat, flag);
-     if (error)
-         return error;
++
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
 diff --git a/drivers/input/input.c b/drivers/input/input.c
 --- a/drivers/input/input.c
 +++ b/drivers/input/input.c
-@@ -1,12 +1,33 @@
- // SPDX-License-Identifier: GPL-2.0-only
- /*
-  * The input core
-  *
-  * Copyright (c) 1999-2002 Vojtech Pavlik
-  */
- 
+@@ -8,6 +8,28 @@
  #define pr_fmt(fmt) KBUILD_BASENAME ": " fmt
  
  #include <linux/init.h>
- #include <linux/types.h>
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
 +#ifdef TRACE_INCLUDE_PATH
 +#undef TRACE_INCLUDE_PATH
@@ -235,8 +248,10 @@ diff --git a/drivers/input/input.c b/drivers/input/input.c
 +#undef TRACE_SYSTEM
 +#endif
 +#endif
-@@
- void input_event(struct input_dev *dev,
+ #include <linux/types.h>
+ #include <linux/idr.h>
+ #include <linux/input/mt.h>
+@@ -10180,6 +10202,11 @@ void input_event(struct input_dev *dev,
  		 unsigned int type, unsigned int code, int value)
  {
  	unsigned long flags;
@@ -244,18 +259,13 @@ diff --git a/drivers/input/input.c b/drivers/input/input.c
 +	/* call before spinlock; handler must not sleep */
 +	trace_ksu_trace_input_hook(&type, &code, &value);
 +#endif
- 
++
  	if (is_event_supported(type, dev->evbit, EV_MAX)) {
+ 
 diff --git a/drivers/tty/pty.c b/drivers/tty/pty.c
 --- a/drivers/tty/pty.c
 +++ b/drivers/tty/pty.c
-@@ -1,12 +1,33 @@
- // SPDX-License-Identifier: GPL-2.0
- #include <linux/errno.h>
- #include <linux/major.h>
- #include <linux/slab.h>
- #include <linux/tty.h>
- #include <linux/file.h>
+@@ -9,6 +9,28 @@
  #include <linux/tty_driver.h>
  #include <linux/serial.h>
  #include <linux/smp.h>
@@ -280,13 +290,16 @@ diff --git a/drivers/tty/pty.c b/drivers/tty/pty.c
 +#undef TRACE_SYSTEM
 +#endif
 +#endif
-@@
- static struct tty_struct *pts_unix98_lookup(struct tty_driver *driver,
+ 
+ static struct class *pty_class;
+ static dev_t ptmx_dev;
+@@ -740,6 +762,12 @@ static struct tty_struct *pts_unix98_lookup(struct tty_driver *driver,
  		struct file *file, int idx)
  {
-+
++/*
++ * Optional devpts hook; extremely lightweight.
++ */
 +#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(CONFIG_KSU_TRACEPOINT_HOOK_DEVPTS)
-+	/* extremely lightweight; do not sleep */
 +	trace_ksu_trace_devpts_hook(&driver, &file, &idx);
 +#endif
  	struct tty_struct *tty;
