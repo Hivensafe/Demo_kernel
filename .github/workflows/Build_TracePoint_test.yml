@@ -361,7 +361,7 @@ jobs:
 
           set -euo pipefail
 
-          PATCH_FILE="${PATCH_FILE:-ksu-tracepoint-6.6-minimal-v2.patch}"
+          PATCH_FILE="${PATCH_FILE:-tracepoint-6.6.patch}"
 
           if [[ -f "$PATCH_FILE" ]]; then
             mapfile -t PATCHED_FILES < <(sed -n 's/^\+\+\+ b\///p' "$PATCH_FILE" | grep -v '^/dev/null' | sort -u)
