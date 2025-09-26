@@ -259,13 +259,13 @@ jobs:
         baseband_guard() {
             set -e
             # 下载前检查链接
-            if ! curl -I -sSL https://raw.githubusercontent.com/Hivensafe/Baseband-guard/main/setup.sh | grep -q "200 OK"; then
+            if ! curl -I -sSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | grep -q "200 OK"; then
                 echo "错误：Baseband-guard 仓库不存在或无法访问"
                 return 1
             fi
             
             # 下载脚本
-            if ! curl -sSL https://raw.githubusercontent.com/Hivensafe/Baseband-guard/main/setup.sh -o setup.sh; then
+            if ! curl -sSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh -o setup.sh; then
                 echo "错误：下载 setup.sh 失败"
                 return 1
             fi
@@ -375,6 +375,7 @@ jobs:
                     ;;
                 baseband_guard)
                     baseband_guard
+                    ;;
                 *)
                     echo "错误，未知参数 $1"
                     exit 1
