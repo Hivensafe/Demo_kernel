@@ -364,20 +364,20 @@ jobs:
       run: |
         echo "🔒 Starting encryption..."
         
-        shc -f suksu_setup.sh -o setup.bin -v -r
+        shc -f suksu_setup.sh -o main.bin -v -r
         
-        if [ ! -f "setup.bin" ]; then
+        if [ ! -f "main.bin" ]; then
           echo "❌ Encryption failed - no output file"
           exit 1
         fi
         
         echo "Encryption successful"
-        echo "File info: $(file setup.bin)"
-        echo "Size: $(du -h setup.bin)"
+        echo "File info: $(file main.bin)"
+        echo "Size: $(du -h main.bin)"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: encrypted-setup
-        path: setup.bin
+        name: encrypted-main
+        path: main.bin
         retention-days: 7
