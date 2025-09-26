@@ -257,11 +257,46 @@ jobs:
 
         # 设置Baseband Guard
         baseband_guard() {
-          curl -sSL https://raw.githubusercontent.com/Hivensafe/Baseband-guard/main/setup.sh -o setup.sh
-          bash setup.sh
-          echo >> ./arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_BBG=y' >> ./arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./arch/arm64/configs/gki_defconfig
+            set -e
+            # 下载前检查链接
+            if ! curl -I -sSL https://raw.githubusercontent.com/Hivensafe/Baseband-guard/main/setup.sh | grep -q "200 OK"; then
+                echo "错误：Baseband-guard 仓库不存在或无法访问"
+                return 1
+            fi
+            
+            # 下载脚本
+            if ! curl -sSL https://raw.githubusercontent.com/Hivensafe/Baseband-guard/main/setup.sh -o setup.sh; then
+                echo "错误：下载 setup.sh 失败"
+                return 1
+            fi
+            
+            # 检查文件是否存在且有执行权限
+            if [ ! -f "setup.sh" ]; then
+                echo "错误：setup.sh 文件不存在"
+                return 1
+            fi
+            
+            chmod +x setup.sh
+            
+            # 检查目标目录是否存在
+            if [ ! -d "./arch/arm64/configs" ]; then
+                echo "错误：目标目录 ./arch/arm64/configs 不存在"
+                echo "当前目录内容:"
+                ls -la
+                return 1
+            fi
+            
+            # 执行脚本
+            if ! bash setup.sh; then
+                echo "错误：执行 setup.sh 失败"
+                return 1
+            fi
+            
+            # 追加配置
+            echo >> ./arch/arm64/configs/gki_defconfig
+            echo 'CONFIG_BBG=y' >> ./arch/arm64/configs/gki_defconfig
+            echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./arch/arm64/configs/gki_defconfig
+            echo "Baseband Guard 配置完成"
         }
 
         # 序列号检查
