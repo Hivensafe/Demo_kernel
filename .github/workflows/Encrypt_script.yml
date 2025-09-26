@@ -254,10 +254,10 @@ jobs:
             rm -f ./AnyKernel3/Image
             echo "AnyKernel3包制作完成"
         }
-        
+
         # 设置Baseband Guard
         baseband_guard() {
-          curl -sSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh -o setup.sh
+          curl -sSL https://raw.githubusercontent.com/Hivensafe/Baseband-guard/main/setup.sh -o setup.sh
           bash setup.sh
           echo >> ./arch/arm64/configs/gki_defconfig
           echo 'CONFIG_BBG=y' >> ./arch/arm64/configs/gki_defconfig
