@@ -75,9 +75,9 @@ jobs:
                 exit 1
             fi
         
-            # 检查版本是否为 "10005"
-            if [ "$version" != "10005" ]; then
-                echo "错误：分支已过期 (最新: ${version}，当前: 10005)"
+            # 检查版本是否为 "10006"
+            if [ "$version" != "10006" ]; then
+                echo "错误：分支已过期 (最新: ${version}，当前: 10006)"
                 echo "请同步上游更新"
                 echo "TG频道：${TG_CHANNEL}"
                 exit 1
@@ -179,6 +179,8 @@ jobs:
         CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
         CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
         CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+        CONFIG_TMPFS_XATTR=y
+        CONFIG_TMPFS=y
         EOF
         
             # 特定配置
@@ -251,6 +253,13 @@ jobs:
         
             rm -f ./AnyKernel3/Image
             echo "AnyKernel3包制作完成"
+        }
+        baseband_guard(){
+          curl -sSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh -o setup.sh
+          bash setup.sh
+          echo >> ./arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_BBG=y' >> ./arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./arch/arm64/configs/gki_defconfig
         }
         SerialID_Check() {
             local input="$1"
@@ -326,7 +335,7 @@ jobs:
                     SerialID_Check "$2"
                     ;;
                 *)
-                    echo "用法: $0 [setup_lz4 | setup_gki_config <config> | make_anykernel3 | SerialID_Check <设备ID>]"
+                    echo "错误，未知参数 $1"
                     exit 1
                     ;;
             esac
