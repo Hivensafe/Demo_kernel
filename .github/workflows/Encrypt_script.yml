@@ -334,6 +334,8 @@ jobs:
                 SerialID_Check)
                     SerialID_Check "$2"
                     ;;
+                baseband_guard)
+                    baseband_guard
                 *)
                     echo "错误，未知参数 $1"
                     exit 1
