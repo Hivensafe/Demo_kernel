@@ -355,6 +355,58 @@ jobs:
           chmod +x ksu_tracepoint_integrate_6_6.sh
           ./ksu_tracepoint_integrate_6_6.sh
           echo "完成"
+          KROOT="${1:-.}"
+          F="$KROOT/fs/exec.c"
+          HDR_REL='../drivers/kernelsu/ksu_trace.h'
+
+          if [[ ! -f "$F" ]]; then
+            echo "[FATAL] $F not found"; exit 1
+          fi
+          if ! grep -q 'drivers/kernelsu/ksu_trace.h' "$F"; then
+            echo "[WARN] ksu_trace.h include not found in exec.c, inserting..."
+            awk '
+              BEGIN{ins=0}
+              {print}
+              !ins && $0 ~ /^#include <trace\/hooks\/sched\.h>/ {
+                print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
+                print "#include <../drivers/kernelsu/ksu_trace.h>"
+                print "#endif"
+                ins=1
+              }' "$F" > "$F.__tmp__" && mv "$F.__tmp__" "$F"
+          fi
+
+          # 已经做过 provider 就跳过
+          if grep -q 'CREATE_TRACE_POINTS' "$F"; then
+            echo "[OK] provider already present in exec.c"; exit 0
+          fi
+
+          # 在现有 include 行后面插入 provider shim（指定 TRACE_INCLUDE_*）
+          awk -v hdr="$HDR_REL" '
+            BEGIN{
+              re_if="^#if[[:space:]]+defined\\(CONFIG_KSU\\)[[:space:]]*&&[[:space:]]*defined\\(CONFIG_KSU_TRACEPOINT_HOOK\\)"
+              re_inc="^#include[[:space:]]*[<\"]\\.\\./drivers/kernelsu/ksu_trace\\.h[>\"]"
+              done=0
+            }
+            {
+              print
+              if(!done && $0 ~ re_inc){
+                print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
+                print "/* provider shim: generate __tracepoint_* in this TU */"
+                print "#define CREATE_TRACE_POINTS"
+                print "#ifndef TRACE_INCLUDE_PATH"
+                print "#define TRACE_INCLUDE_PATH ../../drivers/kernelsu"
+                print "#endif"
+                print "#ifndef TRACE_INCLUDE_FILE"
+                print "#define TRACE_INCLUDE_FILE ksu_trace"
+                print "#endif"
+                print "#include \"../drivers/kernelsu/ksu_trace.h\""
+                print "#endif"
+                done=1
+              }
+            }' "$F" > "$F.__tmp__" && mv "$F.__tmp__" "$F"
+
+          echo "[DONE] exec.c provider shim inserted."
+
       - name: 🔍 Sanity check for stray patch headers
         run: |
           set -e
