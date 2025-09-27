@@ -354,7 +354,54 @@ jobs:
           cp "${GITHUB_WORKSPACE}/.github/workflows/tools/ksu_tracepoint_integrate_6_6.sh" ./ksu_tracepoint_integrate_6_6.sh
           chmod +x ksu_tracepoint_integrate_6_6.sh
           ./ksu_tracepoint_integrate_6_6.sh
-          
+          # 修复：让 6.6 下的 tracepoint 原型/符号正确生成
+          cat > ksu_tp_fix_6_6_headers.sh << 'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          files=(fs/exec.c fs/open.c fs/read_write.c fs/stat.c)
+          for f in "${files[@]}"; do
+            [[ -f "$f" ]] || continue
+
+            # 1) 统一成引号包含，保持你已有的宏防护
+            perl -0777 -i -pe '
+              s{#if\s+defined\(CONFIG_KSU\)\s*&&\s*defined\(CONFIG_KSU_TRACEPOINT_HOOK\)\s*\n\s*#include\s*<\.\./drivers/kernelsu/ksu_trace\.h>\s*\n\s*#endif\s*\n}{
+          #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          #include "../drivers/kernelsu/ksu_trace.h"
+          #endif
+
+          }g' "$f"
+
+            # 2) 万一前一步没命中（比如你原来是别的锚点插入），这里补一个 include
+            if ! grep -q 'drivers/kernelsu/ksu_trace.h' "$f"; then
+              perl -0777 -i -pe '
+                s{(^(\s*#include[^\n]*\n)+)}{$1
+          #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          #include "../drivers/kernelsu/ksu_trace.h"
+          #endif
+
+          }m' "$f"
+            fi
+          done
+
+          # 3) 仅在一个编译单元里定义 CREATE_TRACE_POINTS —— 选 fs/exec.c
+          perl -0777 -i -pe '
+            s{
+          #if\s+defined\(CONFIG_KSU\)\s*&&\s*defined\(CONFIG_KSU_TRACEPOINT_HOOK\)\s*\n\s*#include\s+"../drivers/kernelsu/ksu_trace\.h"\s*\n\s*#endif
+          }{
+          #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          #define CREATE_TRACE_POINTS
+          #include "../drivers/kernelsu/ksu_trace.h"
+          #undef CREATE_TRACE_POINTS
+          #endif
+          }x' fs/exec.c
+
+          echo "[DONE] Applied CREATE_TRACE_POINTS in fs/exec.c and normalized includes."
+          EOF
+
+          chmod +x ksu_tp_fix_6_6_headers.sh
+          ./ksu_tp_fix_6_6_headers.sh
+
           echo "完成"
       - name: 🔍 Sanity check for stray patch headers
         run: |
