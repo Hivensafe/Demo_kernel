@@ -1,87 +1,144 @@
-diff --git a/drivers/kernelsu/ksu_trace.h b/drivers/kernelsu/ksu_trace.h
-index 0000000..0000001 100644
---- a/drivers/kernelsu/ksu_trace.h
-+++ b/drivers/kernelsu/ksu_trace.h
+diff --git a/fs/exec.c b/fs/exec.c
+index 000000000..111111111 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1,10 +1,16 @@
+ #include <linux/capability.h>
+ #include <linux/cred.h>
+ #include <linux/file.h>
+ #include <linux/fs.h>
+ #include <linux/mm.h>
+ #include <linux/security.h>
+ #include <linux/uaccess.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../drivers/kernelsu/ksu_trace.h>
++#endif
 @@
--#undef TRACE_SYSTEM
--#define TRACE_SYSTEM ksu_trace
-+#undef TRACE_SYSTEM
-+#define TRACE_SYSTEM ksu_trace
-
-@@
- DECLARE_TRACE(ksu_trace_execveat_sucompat_hook,
- 	TP_PROTO(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags),
- 	TP_ARGS(fd, filename_ptr, argv, envp, flags));
-+
-+/* 新增：普通 execveat 事件，匹配 fs/exec.c 中的 trace_ksu_trace_execveat_hook() */
-+DECLARE_TRACE(ksu_trace_execveat_hook,
-+	TP_PROTO(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags),
-+	TP_ARGS(fd, filename_ptr, argv, envp, flags));
-
- DECLARE_TRACE(ksu_trace_faccessat_hook,
- 	TP_PROTO(int *dfd, const char __user **filename_user, int *mode, int *flags),
- 	TP_ARGS(dfd, filename_user, mode, flags));
-@@
- #undef TRACE_INCLUDE_FILE
- #define TRACE_INCLUDE_FILE ksu_trace
- #include <trace/define_trace.h>
-diff --git a/drivers/kernelsu/ksu_trace.c b/drivers/kernelsu/ksu_trace.c
-index 0000000..0000002 100644
---- a/drivers/kernelsu/ksu_trace.c
-+++ b/drivers/kernelsu/ksu_trace.c
-@@
--#include "ksu_trace.h"
-+#include "ksu_trace.h"
-+#include <linux/init.h>
-@@
-+/* 新增：普通 execveat 回调，与 sucompat 共享处理函数 */
-+void ksu_trace_execveat_hook_callback(void *data, int *fd, struct filename **filename_ptr,
-+                void *argv, void *envp, int *flags)
-+{
-+	ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);
-+}
-@@
- void ksu_trace_register(void)
+-static int do_execve(struct filename *filename,
++static int do_execve(struct filename *filename,
+                      const char __user *const __argv[],
+                      const char __user *const __envp[])
  {
-+    register_trace_ksu_trace_execveat_hook(ksu_trace_execveat_hook_callback, NULL);
-     register_trace_ksu_trace_execveat_sucompat_hook(ksu_trace_execveat_sucompat_hook_callback, NULL);
-     register_trace_ksu_trace_faccessat_hook(ksu_trace_faccessat_hook_callback, NULL);
-     register_trace_ksu_trace_sys_read_hook(ksu_trace_sys_read_hook_callback, NULL);
-     register_trace_ksu_trace_stat_hook(ksu_trace_stat_hook_callback, NULL);
-     register_trace_ksu_trace_input_hook(ksu_trace_input_hook_callback, NULL);
+     struct user_arg_ptr argv = { .ptr.native = __argv };
+     struct user_arg_ptr envp = { .ptr.native = __envp };
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++    int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
++    trace_ksu_trace_execveat_hook(&__ksu_dfd, &filename, &argv, &envp, &__ksu_flags);
++#endif
+     return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
  }
 @@
- void ksu_trace_unregister(void)
+-static int compat_do_execve(struct filename *filename,
++static int compat_do_execve(struct filename *filename,
+                             const compat_uptr_t __user *__argv,
+                             const compat_uptr_t __user *__envp)
  {
-+    unregister_trace_ksu_trace_execveat_hook(ksu_trace_execveat_hook_callback, NULL);
-     unregister_trace_ksu_trace_execveat_sucompat_hook(ksu_trace_execveat_sucompat_hook_callback, NULL);
-     unregister_trace_ksu_trace_faccessat_hook(ksu_trace_faccessat_hook_callback, NULL);
-     unregister_trace_ksu_trace_sys_read_hook(ksu_trace_sys_read_hook_callback, NULL);
-     unregister_trace_ksu_trace_stat_hook(ksu_trace_stat_hook_callback, NULL);
-     unregister_trace_ksu_trace_input_hook(ksu_trace_input_hook_callback, NULL);
+     struct user_arg_ptr argv = { .is_compat = true, .ptr.compat = __argv };
+     struct user_arg_ptr envp = { .is_compat = true, .ptr.compat = __envp };
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++    int __ksu_dfd = AT_FDCWD, __ksu_flags = 0;
++    trace_ksu_trace_execveat_sucompat_hook(&__ksu_dfd, &filename, NULL, NULL, &__ksu_flags);
++#endif
+     return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
  }
-+
-+/* 新增：自动注册，防止没人调用 ksu_trace_register() */
-+static int __init ksu_trace_init(void)
-+{
-+    ksu_trace_register();
-+    return 0;
-+}
-+subsys_initcall(ksu_trace_init);
-diff --git a/drivers/kernelsu/ksu_trace_provider.c b/drivers/kernelsu/ksu_trace_provider.c
-new file mode 100644
-index 0000000..0000003
---- /dev/null
-+++ b/drivers/kernelsu/ksu_trace_provider.c
+ 
+diff --git a/fs/open.c b/fs/open.c
+index 000000000..222222222 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -1,10 +1,16 @@
+ #include <linux/init.h>
+ #include <linux/fs.h>
+ #include <linux/slab.h>
+ #include <linux/namei.h>
+ #include <linux/file.h>
+ #include <linux/uaccess.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../drivers/kernelsu/ksu_trace.h>
++#endif
 @@
-+/* 实例化 ksu_trace 事件系统：唯一处 */
-+#define CREATE_TRACE_POINTS
-+#define TRACE_INCLUDE_PATH .
-+#define TRACE_INCLUDE_FILE ksu_trace
-+#include "ksu_trace.h"
-diff --git a/drivers/kernelsu/Makefile b/drivers/kernelsu/Makefile
-index 0000000..0000004 100644
---- a/drivers/kernelsu/Makefile
-+++ b/drivers/kernelsu/Makefile
+-SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
++SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ {
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++    int __ksu_flags = 0;
++    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &__ksu_flags);
++#endif
+     return do_faccessat(dfd, filename, mode, 0);
+ }
 @@
-+obj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_trace_provider.o
+-#ifdef CONFIG_FACCESSAT2
++#ifdef CONFIG_FACCESSAT2
+ SYSCALL_DEFINE4(faccessat2, int, dfd, const char __user *, filename,
+                 int, mode, int, flags)
+ {
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, &flags);
++#endif
+     return do_faccessat(dfd, filename, mode, flags);
+ }
+ #endif
+ 
+diff --git a/fs/read_write.c b/fs/read_write.c
+index 000000000..333333333 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -1,10 +1,16 @@
+ #include <linux/fs.h>
+ #include <linux/mm.h>
+ #include <linux/uio.h>
+ #include <linux/slab.h>
+ #include <linux/uaccess.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../drivers/kernelsu/ksu_trace.h>
++#endif
+@@
+-SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
++SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ {
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++    trace_ksu_trace_sys_read_hook(fd, &buf, &count);
++#endif
+     return ksys_read(fd, buf, count);
+ }
+ 
+diff --git a/fs/stat.c b/fs/stat.c
+index 000000000..444444444 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -1,10 +1,16 @@
+ #include <linux/fs.h>
+ #include <linux/stat.h>
+ #include <linux/syscalls.h>
+ #include <linux/time64.h>
+ #include <linux/uaccess.h>
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++#include <../drivers/kernelsu/ksu_trace.h>
++#endif
+@@
+-SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
++SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+                 struct stat __user *, statbuf, int, flag)
+ {
+     struct kstat stat;
+     int error;
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
++#endif
+     error = vfs_fstatat(dfd, filename, &stat, flag);
+     if (error)
+         return error;
+@@
+-COMPAT_SYSCALL_DEFINE4(newfstatat, unsigned int, dfd,
++COMPAT_SYSCALL_DEFINE4(newfstatat, unsigned int, dfd,
+                        const char __user *, filename,
+                        struct compat_stat __user *, statbuf, int, flag)
+ {
+     struct kstat stat;
+     int error;
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
++    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
++#endif
+     error = vfs_fstatat(dfd, filename, &stat, flag);
+     if (error)
+         return error;

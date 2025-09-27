@@ -350,7 +350,7 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           # cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
           # patch -p1 -F 3 < syscall_hooks.patch
-          curl -sSL https://github.com/Hivensafe/SukiSU-TracePoint-fro-6.6/raw/main/tracepoint-6.6.patch -o tracepoint-6.6.patch
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/ksu-trace-fixes-6.6.patch" ./tracepoint-6.6.patch
           sed -i -E 's#^(---|\+\+\+) ([ab])/((exec|open|read_write|stat)\.c)#\1 \2/fs/\3#' tracepoint-6.6.patch
 
           echo ">>> Dry-run 预检 tracepoint 补丁..."
