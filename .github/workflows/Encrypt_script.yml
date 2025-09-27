@@ -258,6 +258,12 @@ jobs:
         # 设置Baseband Guard
         baseband_guard() {
             set -e
+            # 下载前检查链接
+            if ! curl -I -sSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | grep -q "200 OK"; then
+                echo "错误：Baseband-guard 仓库不存在或无法访问"
+                return 1
+            fi
+            
             # 下载脚本
             if ! curl -sSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh -o setup.sh; then
                 echo "错误：下载 setup.sh 失败"
