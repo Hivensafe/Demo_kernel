@@ -402,6 +402,38 @@ jobs:
           chmod +x ksu_tp_fix_6_6_headers.sh
           ./ksu_tp_fix_6_6_headers.sh
 
+          # tools/ksu_tp_undo_create_trace_points.sh
+          cat > tools/ksu_tp_undo_create_trace_points.sh << 'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          f=fs/exec.c
+          [[ -f "$f" ]] || { echo "fs/exec.c not found"; exit 0; }
+
+          # 1) 统一 include 用引号相对路径（更稳）
+          perl -0777 -i -pe 's|#include\s*<\.\./drivers/kernelsu/ksu_trace\.h>|#include "../drivers/kernelsu/ksu_trace.h"|g' "$f"
+
+          # 2) 移除我们之前加的 CREATE_TRACE_POINTS 包装，改回普通包含
+          perl -0777 -i -pe '
+            s{
+          #if\s+defined\(CONFIG_KSU\)\s*&&\s*defined\(CONFIG_KSU_TRACEPOINT_HOOK\)\s*\n
+          #define\s+CREATE_TRACE_POINTS\s*\n
+          #include\s+"\.\./drivers/kernelsu/ksu_trace\.h"\s*\n
+          #undef\s+CREATE_TRACE_POINTS\s*\n
+          #endif
+          }{
+          #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          #include "../drivers/kernelsu/ksu_trace.h"
+          #endif
+          }gx' "$f"
+
+          echo "[OK] exec.c: removed CREATE_TRACE_POINTS block, kept minimal include."
+          EOF
+
+          chmod +x tools/ksu_tp_undo_create_trace_points.sh
+          tools/ksu_tp_undo_create_trace_points.sh
+
+
           echo "完成"
       - name: 🔍 Sanity check for stray patch headers
         run: |
