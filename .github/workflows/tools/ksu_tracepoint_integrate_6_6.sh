@@ -1,161 +1,128 @@
 #!/usr/bin/env bash
-# SukiSU tracepoint minimal integration for Linux 6.6
-# - CI-safe: no `read -d ''` (which returns 1), no unguarded non-zero exits
-# - Idempotent: only inserts once
-# - Backups: *.bak next to modified files
-set -Eeuo pipefail
-trap 'echo "[ERROR] line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
+set -euo pipefail
 
 KROOT="${1:-.}"
 
-log() { printf '[%s] %s\n' "$1" "$2"; }
-
-# ---------- text blocks (CI-safe here-doc into variable) ----------
-INC_BLK="$(cat <<'EOF'
-#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+inc_block='#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
 #include <../drivers/kernelsu/ksu_trace.h>
-#endif
-EOF
-)"
-EXEC_HOOK="$(cat <<'EOF'
-#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-    trace_ksu_trace_execveat_hook((int *)AT_FDCWD, &filename, &argv, &envp, 0);
-#endif
-EOF
-)"
-EXEC_COMPAT_HOOK="$(cat <<'EOF'
-#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-    /* sucompat path (32-bit) */
-    trace_ksu_trace_execveat_sucompat_hook((int *)AT_FDCWD, &filename, NULL, NULL, NULL);
-#endif
-EOF
-)"
-FACC_HOOK="$(cat <<'EOF'
-#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-    /* covers faccessat/access/faccessat2 via common helper */
-    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, NULL);
-#endif
-EOF
-)"
-READ_HOOK="$(cat <<'EOF'
-#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-    trace_ksu_trace_sys_read_hook(fd, &buf, &count);
-#endif
-EOF
-)"
-STAT_HOOK="$(cat <<'EOF'
-#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
-    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
-#endif
-EOF
-)"
+#endif'
 
-# ---------- helpers ----------
-resolve_file() {
-  local f1="${KROOT}/fs/$1" f2="${KROOT}/$1"
-  if [[ -f "$f1" ]]; then echo "$f1"; return 0; fi
-  if [[ -f "$f2" ]]; then echo "$f2"; return 0; fi
-  return 1
-}
-backup_once() { [[ -f "$1.bak" ]] || cp -p "$1" "$1.bak"; }
+log(){ printf '[%s] %s\n' "$1" "$2"; }
 
-insert_after_line() {
-  local file="$1" regex="$2" block="$3"
-  if grep -Fq 'drivers/kernelsu/ksu_trace.h' "$file"; then
-    log OK "include already present in $(basename "$file")"
-    return 0
+insert_after(){ # file regex block
+  local f="$1" re="$2" blk="$3"
+  if grep -Fq 'drivers/kernelsu/ksu_trace.h' "$f"; then
+    log OK "$(basename "$f"): include already present"; return
   fi
-  if grep -Eq "$regex" "$file"; then
-    backup_once "$file"
-    awk -v re="$regex" -v block="$block" '
+  if grep -Eq "$re" "$f"; then
+    awk -v R="$re" -v B="$blk" '
       BEGIN{done=0}
-      {print; if(!done && $0 ~ re){print block; done=1}}
-    ' "$file" > "$file.__tmp__" && mv "$file.__tmp__" "$file"
-    log OK "inserted include into $(basename "$file")"
+      {print; if(!done && $0 ~ R){print B; done=1}}
+    ' "$f" > "$f.__tmp__" && mv "$f.__tmp__" "$f"
+    log OK "$(basename "$f"): inserted include"
   else
-    log WARN "anchor not found for include in $(basename "$file"); skipped"
+    log WARN "$(basename "$f"): include anchor not found; skipped"
   fi
 }
 
-insert_call_after_line() {
-  local file="$1" regex="$2" symbol="$3" block="$4"
-  if grep -Fq "$symbol" "$file"; then
-    log OK "$symbol already present in $(basename "$file")"
-    return 0
+insert_call_after(){ # file regex symbol block
+  local f="$1" re="$2" sym="$3" blk="$4"
+  if grep -Fq "$sym" "$f"; then
+    log OK "$(basename "$f"): $sym already present"; return
   fi
-  if grep -Eq "$regex" "$file"; then
-    backup_once "$file"
-    awk -v re="$regex" -v block="$block" '
+  if grep -Eq "$re" "$f"; then
+    awk -v R="$re" -v B="$blk" '
       BEGIN{done=0}
-      {print; if(!done && $0 ~ re){print block; done=1}}
-    ' "$file" > "$file.__tmp__" && mv "$file.__tmp__" "$file"
-    log OK "inserted $symbol in $(basename "$file")"
+      {print; if(!done && $0 ~ R){print B; done=1}}
+    ' "$f" > "$f.__tmp__" && mv "$f.__tmp__" "$f"
+    log OK "$(basename "$f"): inserted $sym"
   else
-    log WARN "anchor not found for $symbol in $(basename "$file"); skipped"
-  fi
-}
-
-perl_replace() {
-  local file="$1" pattern="$2" replace="$3" symbol="$4"
-  if grep -Fq "$symbol" "$file"; then
-    log OK "$symbol already present in $(basename "$file")"
-    return 0
-  fi
-  if perl -v >/dev/null 2>&1; then
-    backup_once "$file"
-    perl -0777 -pe "$pattern" -i "$file"
-    if grep -Fq "$symbol" "$file"; then
-      log OK "inserted $symbol in $(basename "$file")"
-    else
-      log WARN "failed to insert $symbol in $(basename "$file")"
-    fi
-  else
-    log WARN "perl not available; cannot insert $symbol in $(basename "$file")"
+    log WARN "$(basename "$f"): anchor for $sym not found; skipped"
   fi
 }
 
 # ---------- exec.c ----------
-if EXEC_C="$(resolve_file exec.c)"; then
-  insert_after_line "$EXEC_C" '^#include <trace/hooks/sched\.h>' "$INC_BLK"
-  insert_call_after_line "$EXEC_C" 'struct[[:space:]]+user_arg_ptr[[:space:]]+envp[[:space:]]*=' \
-    'trace_ksu_trace_execveat_hook' "$EXEC_HOOK"
-  insert_call_after_line "$EXEC_C" '^\t\};\s*$' \
-    'trace_ksu_trace_execveat_sucompat_hook' "$EXEC_COMPAT_HOOK"
+EXEC_C="$KROOT/fs/exec.c"
+if [ -f "$EXEC_C" ]; then
+  insert_after "$EXEC_C" '^#include <trace/hooks/sched[.]h>' "$inc_block"
+
+  exec_hook='#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+    trace_ksu_trace_execveat_hook((int *)AT_FDCWD, &filename, &argv, &envp, 0);
+#endif'
+  insert_call_after "$EXEC_C" 'struct[[:space:]]+user_arg_ptr[[:space:]]+envp[[:space:]]*=' \
+    'trace_ksu_trace_execveat_hook' "$exec_hook"
+
+  # sucompat 可选（某些 6.6 分支没有 compat），找不到就跳过
+  compat_hook='#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+    trace_ksu_trace_execveat_sucompat_hook((int *)AT_FDCWD, &filename, NULL, NULL, NULL); /* 32-bit su */
+#endif'
+  insert_call_after "$EXEC_C" 'static[[:space:]]+int[[:space:]]+compat_do_execve(at)?[[:space:]]*\(' \
+    'trace_ksu_trace_execveat_sucompat_hook' "$compat_hook"
 else
-  log WARN "exec.c not found under $KROOT or $KROOT/fs"
+  log WARN "fs/exec.c not found"
 fi
 
 # ---------- open.c ----------
-if OPEN_C="$(resolve_file open.c)"; then
-  if grep -q '^#include <trace/hooks/syscall_check\.h>' "$OPEN_C"; then
-    insert_after_line "$OPEN_C" '^#include <trace/hooks/syscall_check\.h>' "$INC_BLK"
+OPEN_C="$KROOT/fs/open.c"
+if [ -f "$OPEN_C" ]; then
+  if grep -Eq '^#include <trace/hooks/syscall_check[.]h>' "$OPEN_C"; then
+    insert_after "$OPEN_C" '^#include <trace/hooks/syscall_check[.]h>' "$inc_block"
   else
-    insert_after_line "$OPEN_C" '^#include "internal\.h"' "$INC_BLK"
+    insert_after "$OPEN_C" '^#include "internal[.]h"' "$inc_block"
   fi
-  insert_call_after_line "$OPEN_C" 'const[[:space:]]+struct[[:space:]]+cred[[:space:]]*\*[[:space:]]*old_cred' \
-    'trace_ksu_trace_faccessat_hook' "$FACC_HOOK"
+
+  facc_hook='#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+    trace_ksu_trace_faccessat_hook(&dfd, &filename, &mode, NULL);
+#endif'
+  insert_call_after "$OPEN_C" 'const[[:space:]]+struct[[:space:]]+cred[[:space:]]*\*[[:space:]]*old_cred' \
+    'trace_ksu_trace_faccessat_hook' "$facc_hook"
 else
-  log WARN "open.c not found under $KROOT or $KROOT/fs"
+  log WARN "fs/open.c not found"
 fi
 
 # ---------- read_write.c ----------
-if RW_C="$(resolve_file read_write.c)"; then
-  insert_after_line "$RW_C" '^#include <asm/unistd\.h>' "$INC_BLK"
-  perl_replace "$RW_C" \
-    's/(SYSCALL_DEFINE3\(\s*read\s*,[^\)]*\)\s*\{\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n    trace_ksu_trace_sys_read_hook(fd, \&buf, \&count);\n#endif\n/s' \
-    'trace_ksu_trace_sys_read_hook' 'trace_ksu_trace_sys_read_hook'
+RW_C="$KROOT/fs/read_write.c"
+if [ -f "$RW_C" ]; then
+  insert_after "$RW_C" '^#include <asm/unistd[.]h>' "$inc_block"
+
+  # 在 SYSCALL_DEFINE3(read, ...) 的函数体首行插入
+  if ! grep -Fq 'trace_ksu_trace_sys_read_hook' "$RW_C"; then
+    awk '
+      BEGIN{state=0}
+      {
+        print
+        if(state==0 && $0 ~ /SYSCALL_DEFINE3[[:space:]]*\([[:space:]]*read[[:space:]]*,/){ state=1; next }
+        if(state==1 && $0 ~ /^{/){
+          print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
+          print "    trace_ksu_trace_sys_read_hook(fd, &buf, &count);"
+          print "#endif"
+          state=2
+        }
+      }' "$RW_C" > "$RW_C.__tmp__" && mv "$RW_C.__tmp__" "$RW_C"
+    log OK "read_write.c: inserted trace_ksu_trace_sys_read_hook"
+  else
+    log OK "read_write.c: trace_ksu_trace_sys_read_hook already present"
+  fi
 else
-  log WARN "read_write.c not found under $KROOT or $KROOT/fs"
+  log WARN "fs/read_write.c not found"
 fi
 
 # ---------- stat.c ----------
-if STAT_C="$(resolve_file stat.c)"; then
-  insert_after_line "$STAT_C" '^#include "internal\.h"' "$INC_BLK"
-  perl_replace "$STAT_C" \
-    's/(SYSCALL_DEFINE4\(\s*newfstatat[^\{]*\{\s*\n\s*struct\s+kstat\s+stat\s*;\s*\n\s*int\s+error\s*;\s*\n)/$1#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)\n    trace_ksu_trace_stat_hook(\&dfd, \&filename, \&flag);\n#endif\n/s' \
-    'trace_ksu_trace_stat_hook' 'trace_ksu_trace_stat_hook'
+STAT_C="$KROOT/fs/stat.c"
+if [ -f "$STAT_C" ]; then
+  insert_after "$STAT_C" '^#include "internal[.]h"' "$inc_block"
+
+  stat_hook='#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+    trace_ksu_trace_stat_hook(&dfd, &filename, &flag);
+#endif'
+  # 在 newfstatat() 的 "int error;" 之后插入
+  insert_call_after "$STAT_C" 'SYSCALL_DEFINE4[[:space:]]*\([[:space:]]*newfstatat[[:space:]]*,[^\{]*\{[[:space:]]*$' \
+    'trace_ksu_trace_stat_hook' "$stat_hook"
+  # 如上锚点有偏差，补一个更宽松的：
+  insert_call_after "$STAT_C" 'struct[[:space:]]+kstat[[:space:]]+stat;[[:space:]]*$' \
+    'trace_ksu_trace_stat_hook' "$stat_hook"
 else
-  log WARN "stat.c not found under $KROOT or $KROOT/fs"
+  log WARN "fs/stat.c not found"
 fi
 
-log DONE "Tracepoint hook integration complete."
+log DONE "tracepoint minimal integration complete"
