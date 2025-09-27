@@ -406,6 +406,58 @@ jobs:
             }' "$F" > "$F.__tmp__" && mv "$F.__tmp__" "$F"
 
           echo "[DONE] exec.c provider shim inserted."
+          # 0) 防御性清理：把 fs/exec.c 里误加过的 CREATE_TRACE_POINTS 撤掉（如果存在）
+          perl -0777 -i -pe '
+            s{
+          #if\s+defined\(CONFIG_KSU\)\s*&&\s*defined\(CONFIG_KSU_TRACEPOINT_HOOK\)\s*\n
+          #define\s+CREATE_TRACE_POINTS\s*\n
+          (?:#ifndef\s+TRACE_INCLUDE_PATH.*?\n)?(?:#define\s+TRACE_INCLUDE_PATH.*?\n)?(?:#endif\s*\n)?
+          (?:#ifndef\s+TRACE_INCLUDE_FILE.*?\n)?(?:#define\s+TRACE_INCLUDE_FILE.*?\n)?(?:#endif\s*\n)?
+          #include\s+["<]\.\./drivers/kernelsu/ksu_trace\.h[">]\s*\n
+          #\s*endif
+          }{
+          #if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)
+          #include "../drivers/kernelsu/ksu_trace.h"
+          #endif
+          }gs' fs/exec.c || true
+
+          # 1) 查已有 provider（如果你本来就有，就别重复加）
+          if ! grep -R --line-number -E '^\s*#\s*define\s+CREATE_TRACE_POINTS\b' drivers/kernelsu >/dev/null 2>&1; then
+            echo '[INFO] No provider found in drivers/kernelsu, creating a minimal one...'
+            cat > drivers/kernelsu/ksu_tp_provider.c << 'EOF'
+          /* Minimal provider TU for SukiSU tracepoints */
+          #define CREATE_TRACE_POINTS
+          #include "ksu_trace.h"
+          EOF
+
+            # 2) 确保 Makefile 里挂上这个对象，并且只给它加 -I$(src)
+            mf=drivers/kernelsu/Makefile
+            grep -q 'obj-.*CONFIG_KSU_TRACEPOINT_HOOK.*ksu_tp_provider\.o' "$mf" || \
+              printf 'obj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_tp_provider.o\n' >> "$mf"
+            grep -q '^CFLAGS_ksu_tp_provider\.o' "$mf" || \
+              printf 'CFLAGS_ksu_tp_provider.o := -I$(src)\n' >> "$mf"
+          else
+            echo '[INFO] Existing provider found in drivers/kernelsu; keep it.'
+          fi
+
+          # 3) 保险：四个修改点如果没 include 到头文件，这里统一补一遍（幂等）
+          for f in fs/exec.c fs/open.c fs/read_write.c fs/stat.c; do
+            if ! grep -q 'drivers/kernelsu/ksu_trace.h' "$f"; then
+              awk '
+                BEGIN{ins=0}
+                {print}
+                !ins && $0 ~ /^#include/ && $0 !~ /</ {  # 第一批本地 include 之后插
+                  print "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_TRACEPOINT_HOOK)"
+                  print "#include \"../drivers/kernelsu/ksu_trace.h\""
+                  print "#endif"
+                  ins=1
+                }' "$f" > "$f.__tmp__" && mv "$f.__tmp__" "$f"
+              echo "[FIX] added include to $f"
+            fi
+          done
+
+          echo '[OK] Provider & includes are in place.'
+
 
       - name: 🔍 Sanity check for stray patch headers
         run: |
