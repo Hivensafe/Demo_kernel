@@ -350,63 +350,11 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           # cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
           # patch -p1 -F 3 < syscall_hooks.patch
-          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/ksu-trace-fixes-6.6.patch" ./tracepoint-6.6.patch
-          sed -i -E 's#^(---|\+\+\+) ([ab])/((exec|open|read_write|stat)\.c)#\1 \2/fs/\3#' tracepoint-6.6.patch
-
-          echo ">>> Dry-run 预检 tracepoint 补丁..."
-          patch --dry-run -p1 < tracepoint-6.6.patch
-
-          echo ">>> 正式应用 tracepoint 补丁..."
-          patch -p1 < tracepoint-6.6.patch
-
-          set -euo pipefail
-
-          PATCH_FILE="${PATCH_FILE:-tracepoint-6.6.patch}"
-
-          if [[ -f "$PATCH_FILE" ]]; then
-            mapfile -t PATCHED_FILES < <(sed -n 's/^\+\+\+ b\///p' "$PATCH_FILE" | grep -v '^/dev/null' | sort -u)
-          else
-            PATCHED_FILES=(fs/exec.c fs/open.c fs/read_write.c fs/stat.c)
-          fi
-
-          echo "🔎 检查/清理以下文件："
-          printf ' - %s\n' "${PATCHED_FILES[@]}"
-
-          for f in "${PATCHED_FILES[@]}"; do
-            [[ -f "$f" ]] || { echo "⏭️ 跳过不存在: $f"; continue; }
-
-            sed -i -E 's/--- a\/[^\r\n]*$//' "$f"
-            sed -i -E 's/\+\+\+ b\/[^\r\n]*$//' "$f"
-            sed -i -E 's/diff --git[^\r\n]*$//' "$f"
-            sed -i -E 's/@@[^@]*@@[^\r\n]*$//' "$f"
-            sed -i -E 's/\*\*\* End Patch.*$//' "$f"
-
-            sed -i '/^\*\*\* \(Begin\|End\) Patch$/d' "$f"
-
-            total=$(wc -l < "$f" | tr -d ' ')
-            tail -n 80 "$f" | nl -ba -v $((total-80+1)) | \
-              awk '/^( *[0-9]+)\t(--- a\/|\+\+\+ b\/|diff --git|@@ |\*\*\* (Begin|End) Patch)/{print $1; exit}' | \
-              { read -r cutline || true
-                if [[ -n "${cutline:-}" ]]; then
-                  sed -i "${cutline},\$d" "$f"
-                  echo "✂️  Trimmed trailing patch chunk in $f from line $cutline"
-                fi
-              }
-
-            if grep -nE '--- a/|\+\+\+ b/|^diff --git|^@@ |\*\*\* (Begin|End) Patch' "$f" >/dev/null; then
-              echo "❌ ${f} 仍有补丁头残留，请人工检查"
-              exit 1
-            fi
-          done
-
-          echo "✅ 补丁头清理完成"
-
-
-
-
-          echo ">>> 校验插点是否落入 fs/*"
-          grep -RIn "trace_ksu_trace_.*_hook" fs || { echo "未找到 tracepoint hook，检查补丁"; exit 1; }
-
+          echo "配置 TracePoint 补丁:"
+          cp "${GITHUB_WORKSPACE}/.github/workflows/tools/ksu_tracepoint_integrate_6_6.sh" ./ksu_tracepoint_integrate_6_6.sh
+          chmod +x ksu_tracepoint_integrate_6_6.sh
+          ./ksu_tracepoint_integrate_6_6.sh
+          
           echo "完成"
       - name: 🔍 Sanity check for stray patch headers
         run: |
